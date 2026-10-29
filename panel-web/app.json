@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "ApoyAR - Panel Web",
+    "slug": "apoyar-panel-web",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/logo.png",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#101415",
+        "foregroundImage": "./assets/logo.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "name": "ApoyAR - Panel Web",
+      "shortName": "ApoyAR Web",
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}

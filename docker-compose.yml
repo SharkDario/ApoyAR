@@ -1,0 +1,44 @@
+# docker-compose.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# Orquestación de ApoyAR: Backend FastAPI (8000) + Panel Web (8082)
+#
+# La aplicación móvil (`mobile`) se ejecuta directamente en la terminal del host
+# para permitir conexión nativa por USB (ADB) y escaneo directo de código QR en
+# cualquier red Wi-Fi local, apuntando al puerto 8000 expuesto por Docker.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: apoyar-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    volumes:
+      # Hot-reload del código y persistencia de los modelos Vosk/YAMNet locales
+      - ./backend/app:/app/app
+      - ./backend/crear_admin.py:/app/crear_admin.py
+
+  panel-web:
+    build:
+      context: ./panel-web
+      dockerfile: Dockerfile
+    container_name: apoyar-panel-web
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    env_file:
+      - ./panel-web/.env
+    environment:
+      - EXPO_PUBLIC_API_URL=http://localhost:8000
+    volumes:
+      - ./panel-web/App.tsx:/app/App.tsx
+      - ./panel-web/src:/app/src
+      - ./panel-web/assets:/app/assets
+    depends_on:
+      - backend
+

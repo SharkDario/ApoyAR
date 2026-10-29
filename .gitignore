@@ -1,0 +1,95 @@
+# ==============================================================================
+# ApoyAR — Archivo .gitignore Principal (Monorepo: backend, mobile, panel-web)
+# ==============================================================================
+
+# ── Carpetas y archivos excluidos explícitamente del repositorio ─────────────
+diagrams/
+docs/
+logo/
+scratch/
+supabase/
+diagrams_text.txt
+decode.js
+
+# ── Variables de entorno y secretos (NUNCA subir a Git) ──────────────────────
+.env
+.env.*
+!.env.example
+**/google-services.json
+**/GoogleService-Info.plist
+*.jks
+*.keystore
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.pem
+
+# ── Python / Backend (FastAPI) ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Modelos de IA pesados auto-descargables (Vosk / YAMNet ONNX)
+backend/app/models/
+
+# ── Node.js / Expo / React Native (mobile y panel-web) ───────────────────────
+node_modules/
+.expo/
+.expo-shared/
+dist/
+web-build/
+expo-env.d.ts
+.metro-health-check*
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+pnpm-debug.*
+*.tsbuildinfo
+
+# ── Compilación nativa Android / iOS ─────────────────────────────────────────
+.kotlin/
+*.orig.*
+*.apk
+*.aab
+*.ap_
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/app/.cxx/
+mobile/android/local.properties
+mobile/ios/Pods/
+mobile/ios/build/
+
+# ── Logs, reportes de fallos y temporales ────────────────────────────────────
+*.log
+crash.txt
+crash2.txt
+**/crash*.txt
+tmp/
+temp/
+
+# ── Sistema Operativo e IDEs ─────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
