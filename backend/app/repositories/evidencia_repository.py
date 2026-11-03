@@ -21,7 +21,8 @@ COLUMNAS_LISTADO = (
 LISTADO_TESTIGOS = "testigos"
 COLUMNAS_TESTIGOS = (
     "evi_id_evidencia, inc_id_incidente, evi_tipo_archivo, evi_fecha_captura, evi_metadata_dispositivo, "
-    "evi_hash_sha256, evi_prev_hash, evi_token_rfc3161, evi_consentimiento_exportacion, evi_fecha_consentimiento"
+    "evi_hash_sha256, evi_prev_hash, evi_token_rfc3161, evi_consentimiento_exportacion, evi_fecha_consentimiento, "
+    "evi_asociado_en, evi_motivo_asociacion"
 )
 
 

@@ -136,6 +136,18 @@ export interface RegistroTestigo {
   token_rfc3161: string | null;
   consentimiento_exportacion: boolean;
   fecha_consentimiento: string | null;
+  asociado_en: string | null;
+  motivo_asociacion: string | null;
+  incidente: {
+    victima_nombre: string | null;
+    fecha_hora: string;
+    estado: string;
+    origen: string;
+    direccion: string | null;
+    latitud: number;
+    longitud: number;
+    consentimiento_exportacion: boolean;
+  } | null;
 }
 
 // ── Helpers de Formateo y Sincronización Segura de Datos ─────────────────────
@@ -156,6 +168,24 @@ export const formatOrigen = (origen?: string): string => {
 // Las evidencias anteriores a la opción "Soy testigo" no traen esta marca y son de la víctima
 export const formatOrigenCaptura = (origenCaptura?: string | null): string =>
   origenCaptura === 'testigo' ? 'Testigo' : 'Víctima';
+
+// Relaciones que `correlacionar_incidentes` escribe en las notas de cada incidente
+export interface RelacionIncidente {
+  incidenteId: string;
+  fecha: string;
+  motivo: string;
+  operador: string;
+}
+
+const PATRON_RELACION =
+  /^\[Correlación (?:espaciotemporal|Haversine RF-3\.6) ([^\]]+)\] (?:Posible relación con|Vinculado con) incidente ([0-9a-f-]{36})\. Fundamentación: (.*) \(Operador: ([^)]*)\)$/;
+
+export const extraerRelaciones = (notas?: string | null): RelacionIncidente[] =>
+  (notas || '')
+    .split('\n')
+    .map((linea) => PATRON_RELACION.exec(linea.trim()))
+    .filter((r): r is RegExpExecArray => r !== null)
+    .map(([, fecha, incidenteId, motivo, operador]) => ({ incidenteId, fecha, motivo, operador }));
 
 export const formatTipoArchivo = (tipoArchivo?: string | null): string => {
   const tipo = String(tipoArchivo || 'archivo');
@@ -335,6 +365,7 @@ export default function App() {
         fresh.direccion !== selectedIncidente.direccion ||
         fresh.direccion_aprox !== selectedIncidente.direccion_aprox ||
         fresh.victima_nombre !== selectedIncidente.victima_nombre ||
+        fresh.notas !== selectedIncidente.notas ||
         fresh.consentimiento_exportacion !== selectedIncidente.consentimiento_exportacion ||
         fresh.fecha_consentimiento !== selectedIncidente.fecha_consentimiento
       ) {
@@ -1483,6 +1514,14 @@ export default function App() {
                       {new Date(item.fecha_captura).toLocaleDateString()} • {new Date(item.fecha_captura).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} hs
                     </Text>
                   </View>
+                  {item.incidente && (
+                    <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 3 }}>
+                      <Link2 size={11} color={colors.semantic.info} style={{ marginRight: 4 }} />
+                      <Text style={{ fontSize: 11, color: colors.semantic.info }} numberOfLines={1}>
+                        Asociado a: {item.incidente.victima_nombre || 'Persona protegida'} • {new Date(item.incidente.fecha_hora).toLocaleDateString()}
+                      </Text>
+                    </View>
+                  )}
                 </View>
 
                 <View
@@ -1558,9 +1597,36 @@ export default function App() {
             <Link2 size={15} color={colors.text.secondary} style={{ marginRight: 6 }} />
             <Text style={[styles.infoLabel, { color: colors.text.secondary }]}>Estado:</Text>
             <Text style={[styles.infoValue, { color: colors.text.primary }]}>
-              {asociado ? `Asociado al incidente #${testigo.incidente_id!.slice(0, 8)}` : 'Sin asociar'}
+              {asociado
+                ? `Asociado al incidente de ${testigo.incidente?.victima_nombre || 'persona protegida'}`
+                : 'Sin asociar'}
             </Text>
           </View>
+          {testigo.incidente && (
+            <>
+              <View style={styles.infoRow}>
+                <User size={15} color={colors.text.secondary} style={{ marginRight: 6 }} />
+                <Text style={[styles.infoLabel, { color: colors.text.secondary }]}>Incidente:</Text>
+                <Text style={[styles.infoValue, { color: colors.text.primary }]}>
+                  {testigo.incidente.victima_nombre || 'Persona protegida'} • {new Date(testigo.incidente.fecha_hora).toLocaleString('es-AR')} • {formatEstado(testigo.incidente.estado)}
+                </Text>
+              </View>
+              {testigo.asociado_en && (
+                <View style={styles.infoRow}>
+                  <Calendar size={15} color={colors.text.secondary} style={{ marginRight: 6 }} />
+                  <Text style={[styles.infoLabel, { color: colors.text.secondary }]}>Asociado el:</Text>
+                  <Text style={[styles.infoValue, { color: colors.text.primary }]}>{new Date(testigo.asociado_en).toLocaleString('es-AR')}</Text>
+                </View>
+              )}
+              {testigo.motivo_asociacion && (
+                <View style={styles.infoRow}>
+                  <FileText size={15} color={colors.text.secondary} style={{ marginRight: 6 }} />
+                  <Text style={[styles.infoLabel, { color: colors.text.secondary }]}>Motivo:</Text>
+                  <Text style={[styles.infoValue, { color: colors.text.primary }]}>{testigo.motivo_asociacion}</Text>
+                </View>
+              )}
+            </>
+          )}
           <View style={styles.infoRow}>
             {testigo.consentimiento_exportacion
               ? <Check size={15} color={colors.semantic.success} style={{ marginRight: 6 }} />
@@ -1577,6 +1643,13 @@ export default function App() {
             <FileText size={15} color="#FFFFFF" style={{ marginRight: 6 }} />
             <Text style={styles.actionBtnText}>Auditar Evidencias Forenses</Text>
           </TouchableOpacity>
+
+          {testigo.incidente && (
+            <TouchableOpacity style={[styles.actionBtn, { backgroundColor: colors.bg.overlay }]} onPress={() => handleVerIncidenteAsociado(testigo)}>
+              <ExternalLink size={15} color={colors.text.primary} style={{ marginRight: 6 }} />
+              <Text style={[styles.actionBtnText, { color: colors.text.primary }]}>Ver incidente asociado</Text>
+            </TouchableOpacity>
+          )}
 
           {!asociado && tieneUbicacion && (
             <TouchableOpacity style={[styles.actionBtn, { backgroundColor: '#4F46E5' }]} onPress={() => handleBuscarIncidentesCercanos(testigo)}>
@@ -2357,6 +2430,29 @@ export default function App() {
   };
 
   // El registro de testigo no tiene incidente: se audita como una única evidencia
+  // Lleva al incidente aunque no esté en la página de incidentes cargada
+  const handleVerIncidenteAsociado = (testigo: RegistroTestigo) => {
+    if (!testigo.incidente_id || !testigo.incidente) return;
+    const incidente = testigo.incidente;
+    setVerTestigos(false);
+    setTestigoSeleccionado(null);
+    setFiltroEstado('todos');
+    setSelectedIncidente(
+      incidentes.find((i) => i.id === testigo.incidente_id) || {
+        id: testigo.incidente_id,
+        victima_id: '',
+        victima_nombre: incidente.victima_nombre || undefined,
+        direccion: incidente.direccion || undefined,
+        latitud: incidente.latitud,
+        longitud: incidente.longitud,
+        origen: incidente.origen,
+        estado: incidente.estado,
+        fecha_hora: incidente.fecha_hora,
+        consentimiento_exportacion: incidente.consentimiento_exportacion,
+      }
+    );
+  };
+
   const handleAbrirAuditoriaTestigo = (testigo: RegistroTestigo) => {
     handleCerrarReproductor();
     setSelectedIncidente(null);
@@ -3908,6 +4004,42 @@ export default function App() {
                   </Text>
                 </View>
               </View>
+
+              {/* Incidentes relacionados por un operador */}
+              {(() => {
+                const relaciones = extraerRelaciones((selectedIncidente as any).inc_notas ?? selectedIncidente.notas);
+                if (relaciones.length === 0) return null;
+                return (
+                  <View style={[styles.drawerInfoBlock, { backgroundColor: colors.bg.base, borderColor: colors.border.default, gap: 8 }]}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <Link2 size={15} color={colors.semantic.info} />
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: colors.text.primary }}>
+                        Incidentes relacionados ({relaciones.length})
+                      </Text>
+                    </View>
+                    {relaciones.map((relacion, indice) => {
+                      const otro = incidentes.find((i) => i.id === relacion.incidenteId);
+                      return (
+                        <TouchableOpacity
+                          key={`${relacion.incidenteId}-${indice}`}
+                          disabled={!otro}
+                          onPress={() => otro && setSelectedIncidente(otro)}
+                          style={{ paddingTop: 8, borderTopWidth: 1, borderTopColor: colors.border.default, gap: 2 }}
+                        >
+                          <Text style={{ fontSize: 12, fontWeight: '600', color: otro ? colors.semantic.info : colors.text.primary }}>
+                            {otro?.victima_nombre || `Incidente #${relacion.incidenteId.slice(0, 8)}`}
+                            {otro ? ` • ${new Date(otro.fecha_hora).toLocaleString('es-AR')}` : ''}
+                          </Text>
+                          <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                            Relacionado por {relacion.operador} el {new Date(relacion.fecha).toLocaleString('es-AR')}
+                          </Text>
+                          <Text style={{ fontSize: 11, color: colors.text.secondary }}>Motivo: {relacion.motivo}</Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                );
+              })()}
 
               {/* Botones Operativos de Acción */}
               <View style={styles.drawerActions}>

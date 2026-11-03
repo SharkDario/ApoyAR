@@ -31,15 +31,24 @@ class IncidenteRepository(SupabaseRepository):
         return self._filas(res)
 
     def cerrar_en_curso_de_victima(self, victima_id: str, excepto_incidente_id: str, notas: str) -> None:
-        """Cierra los incidentes 'en_curso' previos de la víctima, salvo el indicado."""
-        (
+        """Cierra los incidentes 'en_curso' previos de la víctima, salvo el indicado, agregando la nota."""
+        previos = self._filas(
             self._query()
-            .update({"inc_estado": "cerrado", "inc_notas": notas})
+            .select("inc_id_incidente, inc_notas")
             .eq("usu_id_victima", victima_id)
             .eq("inc_estado", "en_curso")
             .neq("inc_id_incidente", excepto_incidente_id)
             .execute()
         )
+        for previo in previos:
+            notas_actuales = previo.get("inc_notas") or ""
+            (
+                self._query()
+                .update({"inc_estado": "cerrado", "inc_notas": f"{notas_actuales}\n{notas}".strip() if notas_actuales else notas})
+                .eq("inc_id_incidente", previo["inc_id_incidente"])
+                .eq("inc_estado", "en_curso")
+                .execute()
+            )
 
     def contar(self, estado: Optional[str] = None) -> int:
         query = self._query().select("inc_id_incidente", count="exact")

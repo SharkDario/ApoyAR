@@ -346,17 +346,21 @@ class SupervisionService:
             raise RecursoNoEncontradoError(f"Incidente destino {solicitud.incidente_destino_id} no encontrado.")
 
         now_iso = datetime.now(timezone.utc).isoformat()
-        nota_correlacion = (
-            f"[Correlación espaciotemporal {now_iso}] "
-            f"Posible relación con incidente {solicitud.incidente_destino_id}. "
-            f"Fundamentación: {solicitud.justificacion_operativa.strip()} "
-            f"(Operador: {operador.get('email', operador.get('id'))})"
-        )
+        justificacion = solicitud.justificacion_operativa.strip()
+        operador_ref = operador.get("email", operador.get("id"))
 
+        # La relación queda escrita en los dos incidentes, cada uno apuntando al otro
         try:
-            notas_actuales = inc_orig.get("inc_notas") or ""
-            nuevas_notas = f"{notas_actuales}\n{nota_correlacion}".strip() if notas_actuales else nota_correlacion
-            self._incidentes.actualizar(solicitud.incidente_origen_id, {"inc_notas": nuevas_notas})
+            for incidente, relacionado in ((inc_orig, solicitud.incidente_destino_id), (inc_dest, solicitud.incidente_origen_id)):
+                nota = (
+                    f"[Correlación espaciotemporal {now_iso}] "
+                    f"Posible relación con incidente {relacionado}. "
+                    f"Fundamentación: {justificacion} "
+                    f"(Operador: {operador_ref})"
+                )
+                notas_actuales = incidente.get("inc_notas") or ""
+                nuevas_notas = f"{notas_actuales}\n{nota}".strip() if notas_actuales else nota
+                self._incidentes.actualizar(incidente["inc_id_incidente"], {"inc_notas": nuevas_notas})
         except Exception as exc:
             logger.error("Error al asentar notas de correlación: %s", exc)
             raise ErrorInternoError(f"No se pudo registrar la correlación en el expediente: {exc}")
@@ -367,5 +371,5 @@ class SupervisionService:
             "incidente_destino_id": solicitud.incidente_destino_id,
             "operador_id": operador.get("id"),
             "fecha_hora": now_iso,
-            "fundamentacion": solicitud.justificacion_operativa.strip(),
+            "fundamentacion": justificacion,
         }

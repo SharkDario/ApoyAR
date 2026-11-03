@@ -159,12 +159,15 @@ class IncidenteService:
 
         if usuario:
             self._acceso.verificar_acceso_incidente(incidente_id, usuario, accion="update_estado")
-        elif not self._incidentes.obtener_por_id(incidente_id, "inc_id_incidente"):
+        actual = self._incidentes.obtener_por_id(incidente_id, "inc_id_incidente, inc_notas")
+        if not actual:
             raise RecursoNoEncontradoError(f"Incidente {incidente_id} no encontrado.")
 
+        # Las notas se agregan: reemplazarlas borraría las relaciones y asociaciones registradas
         campos = {"inc_estado": solicitud.estado}
         if solicitud.notas:
-            campos["inc_notas"] = solicitud.notas
+            notas_actuales = actual.get("inc_notas") or ""
+            campos["inc_notas"] = f"{notas_actuales}\n{solicitud.notas}".strip() if notas_actuales else solicitud.notas
 
         if not self._incidentes.actualizar(incidente_id, campos):
             raise RecursoNoEncontradoError(f"Incidente {incidente_id} no encontrado.")

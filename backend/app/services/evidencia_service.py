@@ -21,7 +21,7 @@ from app.errors import (
     RecursoNoEncontradoError,
     ServicioExternoError,
 )
-from app.repositories.evidencia_repository import COLUMNAS_LISTADO, COLUMNAS_TESTIGOS, LISTADO_TESTIGOS, EvidenciaRepository
+from app.repositories.evidencia_repository import COLUMNAS_LISTADO, COLUMNAS_TESTIGOS, LISTADO_TESTIGOS, EvidenciaRepository, prefijo_expediente
 from app.repositories.evidencia_storage import EvidenciaStorage
 from app.repositories.incidente_repository import IncidenteRepository
 from app.schemas.evidencias import SellarForenseRequest
@@ -42,6 +42,10 @@ from app.services.tsa_client import TSAClient
 logger = logging.getLogger("apoyar.evidencias")
 
 GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000"
+COLUMNAS_INCIDENTE_DE_TESTIGO = (
+    "inc_victima_nombre, inc_fecha_hora, inc_estado, inc_origen, inc_direccion, inc_latitud, inc_longitud, "
+    "inc_consentimiento_exportacion"
+)
 
 
 @dataclass
@@ -387,9 +391,13 @@ class EvidenciaService:
                 metadata = ev.get("evi_metadata_dispositivo") or {}
                 incidente_asociado = ev.get("inc_id_incidente")
                 consentimiento = bool(ev.get("evi_consentimiento_exportacion"))
-                if consentimiento and incidente_asociado:
-                    incidente = self._incidentes.obtener_por_id(str(incidente_asociado), "inc_consentimiento_exportacion")
-                    consentimiento = bool(incidente and incidente.get("inc_consentimiento_exportacion"))
+                incidente = None
+                if incidente_asociado:
+                    incidente = self._incidentes.obtener_por_id(str(incidente_asociado), COLUMNAS_INCIDENTE_DE_TESTIGO)
+                    consentimiento = consentimiento and bool(incidente and incidente.get("inc_consentimiento_exportacion"))
+                motivo = str(ev.get("evi_motivo_asociacion") or "")
+                if incidente_asociado and motivo.startswith(prefijo_expediente(str(incidente_asociado))):
+                    motivo = motivo[len(prefijo_expediente(str(incidente_asociado))):]
                 registros.append({
                     "id": ev.get("evi_id_evidencia"),
                     "incidente_id": incidente_asociado,
@@ -402,6 +410,18 @@ class EvidenciaService:
                     "token_rfc3161": ev.get("evi_token_rfc3161"),
                     "consentimiento_exportacion": consentimiento,
                     "fecha_consentimiento": ev.get("evi_fecha_consentimiento"),
+                    "asociado_en": ev.get("evi_asociado_en"),
+                    "motivo_asociacion": motivo or None,
+                    "incidente": {
+                        "victima_nombre": incidente.get("inc_victima_nombre"),
+                        "fecha_hora": incidente.get("inc_fecha_hora"),
+                        "estado": incidente.get("inc_estado"),
+                        "origen": incidente.get("inc_origen"),
+                        "direccion": incidente.get("inc_direccion"),
+                        "latitud": incidente.get("inc_latitud"),
+                        "longitud": incidente.get("inc_longitud"),
+                        "consentimiento_exportacion": incidente.get("inc_consentimiento_exportacion"),
+                    } if incidente else None,
                 })
 
             return {

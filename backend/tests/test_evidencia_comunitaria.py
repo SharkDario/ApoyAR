@@ -22,7 +22,7 @@ from app.repositories.evidencia_storage import EvidenciaStorage
 from app.repositories.incidente_repository import IncidenteRepository
 from app.repositories.red_apoyo_repository import RedApoyoRepository
 from app.repositories.usuario_repository import UsuarioRepository
-from app.schemas.admin import AsociarEvidenciaRequest, SugerenciasQuery
+from app.schemas.admin import AsociarEvidenciaRequest, CorrelacionarIncidentesRequest, SugerenciasQuery
 from app.schemas.evidencias import SellarEvidenciaComunitariaRequest
 from app.services import atestacion_hardware, evidencia_cripto
 from app.services.access_control import AccessControlService
@@ -130,9 +130,21 @@ class ListadoTestigosTest(unittest.TestCase):
         self.assertEqual(respuesta["total_registros"], 1)
         self.assertEqual(set(respuesta["evidencias"][0]), {
             "id", "incidente_id", "tipo_archivo", "fecha_captura", "latitud", "longitud", "hash_sha256", "prev_hash",
-            "token_rfc3161", "consentimiento_exportacion", "fecha_consentimiento",
+            "token_rfc3161", "consentimiento_exportacion", "fecha_consentimiento", "asociado_en", "motivo_asociacion", "incidente",
         })
         self.assertEqual(respuesta["evidencias"][0]["latitud"], -26.18)
+
+    def test_informa_el_incidente_y_el_motivo_de_la_asociacion(self):
+        self.db.tables["incidente"] = [{"inc_id_incidente": INCIDENTE, "inc_victima_nombre": "Persona", "inc_estado": "cerrado",
+                                        "inc_consentimiento_exportacion": True}]
+        self.db.tables["evidencia"][0].update({"inc_id_incidente": INCIDENTE, "evi_consentimiento_exportacion": True,
+                                               "evi_motivo_asociacion": f"{prefijo_expediente(INCIDENTE)}Misma hora y lugar"})
+
+        registro = self.listar()["evidencias"][0]
+
+        self.assertEqual(registro["incidente"]["victima_nombre"], "Persona")
+        self.assertEqual(registro["motivo_asociacion"], "Misma hora y lugar")
+        self.assertTrue(registro["consentimiento_exportacion"])
 
     def test_filtra_por_fecha_de_captura(self):
         self.assertEqual(self.listar(desde="2026-05-01T11:00:00.000Z", hasta="2026-05-01T13:00:00.000Z")["total_registros"], 1)
@@ -181,6 +193,17 @@ class CorrelacionTest(unittest.TestCase):
         self.assertEqual(sugerencia["origen_captura"], "testigo")
         self.assertEqual(sugerencia["incidente"]["victima_nombre"], "Persona")
         self.assertIs(sugerencia["incidente"]["consentimiento_exportacion"], False)
+
+    def test_la_relacion_entre_incidentes_queda_en_ambos(self):
+        otro = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        solicitud = CorrelacionarIncidentesRequest(incidente_origen_id=INCIDENTE, incidente_destino_id=otro,
+                                                   justificacion_operativa="Misma hora y misma cuadra")
+        self.servicio.correlacionar_incidentes(solicitud, {"id": AUTORIDAD, "email": "op@apoyar.local"})
+
+        notas = {i["inc_id_incidente"]: i["inc_notas"] for i in self.db.tables["incidente"]}
+        self.assertIn(f"Posible relación con incidente {otro}", notas[INCIDENTE])
+        self.assertIn(f"Posible relación con incidente {INCIDENTE}", notas[otro])
+        self.assertIn("op@apoyar.local", notas[otro])
 
     def test_incidente_sin_gps_no_genera_coincidencias(self):
         cerca_de_cero = SugerenciasQuery(latitud=0, longitud=0, fecha_hora="2026-05-01T12:00:00Z", radio_metros=500)
