@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     supabase_jwks_url: str | None = None
     supabase_jwt_issuer: str | None = None
 
+    # Clave privada RSA (PEM en Base64) que abre las DEK de evidencia (RF-3.2)
+    dek_custodia_private_key_b64: str | None = None
+
     @property
     def jwks_url(self) -> str:
         if self.supabase_jwks_url:

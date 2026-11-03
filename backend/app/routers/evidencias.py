@@ -21,6 +21,7 @@ from app.schemas.evidencias import (
     JUSTIFICACION_EXPORTACION_POR_DEFECTO,
     ActualizarConsentimientoRequest,
     ExportarRequest,
+    SellarEvidenciaComunitariaRequest,
     SellarForenseRequest,
 )
 from app.services.auth_dependencies import (
@@ -66,6 +67,21 @@ async def sellar_forense(
     service: EvidenciaService = Depends(get_evidencia_service),
 ):
     exigir_usuario_o_api_secret(current_user, x_api_secret)
+    return await service.sellar_forense(body, current_user)
+
+
+@router.post(
+    "/sellar-comunitaria",
+    status_code=status.HTTP_201_CREATED,
+    summary="Sellado de evidencia de testigo sin incidente previo (RF-3.6)",
+    description="Preserva la evidencia con el mismo protocolo que sellar-forense, sin vincularla a un incidente. Sólo el autor autenticado puede registrarla.",
+)
+async def sellar_evidencia_comunitaria(
+    body: SellarEvidenciaComunitariaRequest,
+    current_user: Dict[str, Any] = Depends(get_current_active_user),
+    service: EvidenciaService = Depends(get_evidencia_service),
+):
+    body.incidente_id = None
     return await service.sellar_forense(body, current_user)
 
 
@@ -121,16 +137,24 @@ async def reproducir_evidencia(
 @router.get(
     "/incidente/{incidente_id}",
     summary="Listar evidencias de un incidente con encadenamiento criptográfico y paginación",
-    description="Retorna las evidencias asociadas a un incidente aplicando separación entre metadatos forenses y multimedia (Ley 25.326) con paginación de 10 en 10.",
+    description="""
+    Retorna las evidencias asociadas a un incidente aplicando separación entre metadatos forenses
+    y multimedia (Ley 25.326) con paginación de 10 en 10.
+
+    Con `testigos` como identificador devuelve los registros anónimos de testigos para la Autoridad,
+    con filtro opcional por fecha de captura (`desde` y `hasta`).
+    """,
 )
 async def listar_evidencias_incidente(
     incidente_id: str,
     page: int = 1,
     limit: int = 10,
+    desde: Optional[str] = None,
+    hasta: Optional[str] = None,
     current_user: Dict[str, Any] = Depends(get_current_active_user),
     service: EvidenciaService = Depends(get_evidencia_service),
 ):
-    return service.listar_evidencias_incidente(incidente_id, page, limit, current_user)
+    return service.listar_evidencias_incidente(incidente_id, page, limit, current_user, desde, hasta)
 
 
 @router.patch(

@@ -13,8 +13,24 @@ logger = logging.getLogger("apoyar.repositories.evidencia")
 COLUMNAS_LISTADO = (
     "evi_id_evidencia, inc_id_incidente, usu_id_usuario, evi_tipo_archivo, evi_url_almacenamiento, "
     "evi_hash_sha256, evi_prev_hash, evi_token_rfc3161, evi_firma_hardware, evi_fecha_captura, "
-    "evi_sincronizado_en, evi_consentimiento_exportacion, evi_fecha_consentimiento"
+    "evi_sincronizado_en, evi_consentimiento_exportacion, evi_fecha_consentimiento, evi_origen_captura"
 )
+
+
+# Identificador reservado del listado: los registros de testigos no pertenecen a un único incidente
+LISTADO_TESTIGOS = "testigos"
+COLUMNAS_TESTIGOS = (
+    "evi_id_evidencia, inc_id_incidente, evi_tipo_archivo, evi_fecha_captura, evi_metadata_dispositivo, "
+    "evi_hash_sha256, evi_prev_hash, evi_token_rfc3161, evi_consentimiento_exportacion, evi_fecha_consentimiento"
+)
+
+
+def prefijo_expediente(incidente_id: str) -> str:
+    """
+    Marca de asociación en `evi_motivo_asociacion`. Los triggers de inmutabilidad
+    impiden modificar `inc_id_incidente`, que conserva su valor original.
+    """
+    return f"[Expediente {incidente_id}] "
 
 
 class EvidenciaRepository(SupabaseRepository):
@@ -69,14 +85,20 @@ class EvidenciaRepository(SupabaseRepository):
         return self._primera_fila(res)
 
     def listar_por_incidente(self, incidente_id: str, columnas: str = "*", descendente: bool = False) -> List[Dict[str, Any]]:
-        res = (
+        """Evidencias propias del incidente y las asociadas a él por una Autoridad."""
+        if incidente_id == LISTADO_TESTIGOS:
+            filas = self._filas(self._query().select(columnas).eq("evi_origen_captura", "testigo").execute())
+            return sorted(filas, key=lambda fila: str(fila.get("evi_fecha_captura") or ""), reverse=descendente)
+
+        propias = self._query().select(columnas).eq("inc_id_incidente", incidente_id).execute()
+        asociadas = (
             self._query()
             .select(columnas)
-            .eq("inc_id_incidente", incidente_id)
-            .order("evi_fecha_captura", desc=descendente)
+            .like("evi_motivo_asociacion", f"{prefijo_expediente(incidente_id)}%")
             .execute()
         )
-        return self._filas(res)
+        filas = {fila["evi_id_evidencia"]: fila for fila in self._filas(propias) + self._filas(asociadas)}
+        return sorted(filas.values(), key=lambda fila: str(fila.get("evi_fecha_captura") or ""), reverse=descendente)
 
     def listar_rutas_de_usuario(self, usuario_id: str) -> List[Dict[str, Any]]:
         res = self._query().select("evi_url_almacenamiento").eq("usu_id_usuario", usuario_id).execute()

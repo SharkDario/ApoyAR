@@ -24,6 +24,7 @@ decode.js
 *.key
 *.mobileprovision
 *.pem
+!backend/app/services/raices_atestacion_google.pem
 
 # ── Python / Backend (FastAPI) ───────────────────────────────────────────────
 __pycache__/

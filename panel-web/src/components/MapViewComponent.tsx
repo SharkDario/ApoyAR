@@ -292,10 +292,14 @@ export const MapViewComponent: React.FC<MapProps> = ({
 
   // Generador de HTML para el Popup
   const generatePopupHtml = (inc: IncidentMarker, safeLat: number, safeLng: number, isEnCurso: boolean) => {
+    const esTestigo = inc.estado === 'testigo';
+    const fondoEtiqueta = isEnCurso ? 'rgba(239, 68, 68, 0.15)' : esTestigo ? 'rgba(59, 130, 246, 0.15)' : 'rgba(16, 185, 129, 0.15)';
+    const colorEtiqueta = isEnCurso ? '#f87171' : esTestigo ? '#93c5fd' : '#34d399';
+    const bordeEtiqueta = isEnCurso ? 'rgba(239, 68, 68, 0.4)' : esTestigo ? 'rgba(59, 130, 246, 0.4)' : 'rgba(16, 185, 129, 0.4)';
     return `
       <div style="font-family: inherit; min-width: 210px; padding: 12px 14px; background: ${isDark ? '#0f172a' : '#ffffff'}; color: ${isDark ? '#f8fafc' : '#0f172a'}; border-radius: 10px;">
         <div style="display: flex; align-items: center; gap: 7px; margin-bottom: 6px;">
-          <span style="display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: ${isEnCurso ? '#ef4444' : '#10b981'}; box-shadow: ${isEnCurso ? '0 0 8px #ef4444' : 'none'}; flex-shrink: 0;"></span>
+          <span style="display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: ${isEnCurso ? '#ef4444' : esTestigo ? '#3b82f6' : '#10b981'}; box-shadow: ${isEnCurso ? '0 0 8px #ef4444' : 'none'}; flex-shrink: 0;"></span>
           <strong style="font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
             ${inc.victimaNombre || 'Víctima Protegida'}
           </strong>
@@ -304,7 +308,7 @@ export const MapViewComponent: React.FC<MapProps> = ({
           ${inc.direccion || `${safeLat.toFixed(5)}, ${safeLng.toFixed(5)}`}
         </p>
         <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 8px; padding-top: 8px; border-top: 1px solid ${isDark ? '#334155' : '#e2e8f0'};">
-          <span style="display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 4px; font-size: 10px; font-weight: 800; letter-spacing: 0.5px; background: ${isEnCurso ? 'rgba(239, 68, 68, 0.15)' : 'rgba(16, 185, 129, 0.15)'}; color: ${isEnCurso ? '#f87171' : '#34d399'}; border: 1px solid ${isEnCurso ? 'rgba(239, 68, 68, 0.4)' : 'rgba(16, 185, 129, 0.4)'};">
+          <span style="display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 4px; font-size: 10px; font-weight: 800; letter-spacing: 0.5px; background: ${fondoEtiqueta}; color: ${colorEtiqueta}; border: 1px solid ${bordeEtiqueta};">
             ${formatEstado(inc.estado)}
           </span>
           <span style="font-size: 11px; color: ${isDark ? '#cbd5e1' : '#475569'}; font-weight: 600;">
@@ -316,7 +320,7 @@ export const MapViewComponent: React.FC<MapProps> = ({
   };
 
   // Renderizar contenido interno del marcador
-  const renderMarkerContent = (el: HTMLDivElement, isEnCurso: boolean, isSelected: boolean) => {
+  const renderMarkerContent = (el: HTMLDivElement, isEnCurso: boolean, isSelected: boolean, esTestigo: boolean) => {
     if (isEnCurso) {
       el.style.width = isSelected ? '46px' : '38px';
       el.style.height = isSelected ? '46px' : '38px';
@@ -338,8 +342,8 @@ export const MapViewComponent: React.FC<MapProps> = ({
       el.style.width = isSelected ? '30px' : '24px';
       el.style.height = isSelected ? '30px' : '24px';
       el.style.borderRadius = '50%';
-      el.style.backgroundColor = '#10B981';
-      el.style.border = isSelected ? '3px solid #60A5FA' : '2px solid #FFFFFF';
+      el.style.backgroundColor = esTestigo ? '#3B82F6' : '#10B981';
+      el.style.border = isSelected ? (esTestigo ? '3px solid #FFFFFF' : '3px solid #60A5FA') : '2px solid #FFFFFF';
       el.style.boxShadow = isSelected ? '0 0 14px rgba(96, 165, 250, 0.9)' : '0 3px 8px rgba(0,0,0,0.35)';
       el.style.cursor = 'pointer';
       el.style.display = 'flex';
@@ -348,7 +352,7 @@ export const MapViewComponent: React.FC<MapProps> = ({
       el.style.color = '#FFFFFF';
       el.style.fontSize = '12px';
       el.style.fontWeight = 'bold';
-      el.innerHTML = '✓';
+      el.innerHTML = esTestigo ? 'T' : '✓';
     }
   };
 
@@ -381,7 +385,7 @@ export const MapViewComponent: React.FC<MapProps> = ({
         if (cached.isEnCurso !== isEnCurso || cached.isSelected !== isSelected) {
           cached.isEnCurso = isEnCurso;
           cached.isSelected = isSelected;
-          renderMarkerContent(cached.el, isEnCurso, isSelected);
+          renderMarkerContent(cached.el, isEnCurso, isSelected, inc.estado === 'testigo');
         }
 
         // Actualizar el contenido del popup
@@ -391,7 +395,7 @@ export const MapViewComponent: React.FC<MapProps> = ({
         // Nuevo marcador: Crear elemento contenedor neutro (sin animation ni transform)
         const el = document.createElement('div');
         el.className = 'custom-incident-marker';
-        renderMarkerContent(el, isEnCurso, isSelected);
+        renderMarkerContent(el, isEnCurso, isSelected, inc.estado === 'testigo');
 
         const popupHtml = generatePopupHtml(inc, safeLat, safeLng, isEnCurso);
         const popup = new PopupConstructor({

@@ -65,7 +65,7 @@ class IncidenteRepository(SupabaseRepository):
     def listar_en_ventana_temporal(self, desde_iso: str, hasta_iso: str) -> List[Dict[str, Any]]:
         res = (
             self._query()
-            .select("inc_id_incidente, inc_victima_nombre, inc_latitud, inc_longitud, inc_fecha_hora, inc_estado")
+            .select("inc_id_incidente, inc_victima_nombre, inc_latitud, inc_longitud, inc_direccion, inc_origen, inc_fecha_hora, inc_estado, inc_consentimiento_exportacion")
             .gte("inc_fecha_hora", desde_iso)
             .lte("inc_fecha_hora", hasta_iso)
             .execute()

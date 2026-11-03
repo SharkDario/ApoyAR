@@ -91,12 +91,15 @@ class CuentaService:
 
     def eliminar_cuenta(self, usuario_id: str) -> None:
         """
-        Derecho de supresión: 1) purga los archivos cifrados del bucket,
-        2) borra en cascada los registros (RPC SECURITY DEFINER) y
-        3) elimina la cuenta de Supabase Auth.
+        Derecho de supresión y anonimización irreversible (Art. 16 Ley 25.326):
+        1) Anonimiza y disocia identificadores personales (nombre, DNI, email, teléfono, dirección).
+        2) Desvincula y elimina contactos de red_apoyo y tokens en dispositivo_usuario.
+        3) Anonimiza referencias en incidentes para preservar series estadísticas y auditoría penal sin reidentificación.
+        4) Elimina definitivamente la cuenta y credenciales en Supabase Auth (auth.users).
         """
-        logger.info("Iniciando supresión soberana de cuenta para usuario: %s (Art. 16 Ley 25.326)", usuario_id)
+        logger.info("Iniciando anonimización y disociación de cuenta para usuario: %s (Art. 16 Ley 25.326)", usuario_id)
 
+        # 1. Purgar archivos de evidencia si aplica
         try:
             rutas = []
             for row in self._evidencias.listar_rutas_de_usuario(usuario_id):
@@ -109,13 +112,48 @@ class CuentaService:
         except Exception as st_err:
             logger.warning("Aviso purgando archivos en storage para usuario %s: %s", usuario_id, st_err)
 
+        # 2. Anonimización de la entidad Persona (desvinculación de DNI, teléfono, dirección, nombre)
         try:
-            resultado = self._usuarios.eliminar_cuenta_en_cascada(usuario_id)
-            logger.info("Resultado de RPC fn_eliminar_cuenta_usuario: %s", resultado)
-        except Exception as rpc_err:
-            logger.error("Error en RPC de supresión de cuenta para usuario %s: %s", usuario_id, rpc_err)
-            raise ErrorInternoError(f"No se pudo completar la supresión de registros en la base de datos: {rpc_err}")
+            persona_id = self._usuarios.obtener_id_persona(usuario_id)
+            if persona_id:
+                self._usuarios.actualizar_persona(persona_id, {
+                    "per_nombre": "Persona Anónima",
+                    "per_apellido": "Disociada",
+                    "per_dni": None,
+                    "per_telefono": None,
+                    "per_direccion": None,
+                    "per_genero": "No especificado",
+                })
+                logger.info("Identificadores de persona %s anonimizados exitosamente", persona_id)
+        except Exception as p_err:
+            logger.warning("Aviso anonimizando persona para usuario %s: %s", usuario_id, p_err)
 
+        # 3. Disociación de incidentes históricos (se conservan coordenadas y fechas para estadísticas criminales)
+        try:
+            self._usuarios._query("incidente").update({
+                "inc_victima_nombre": "Persona Protegida (Anonimizada)",
+            }).eq("usu_id_victima", usuario_id).execute()
+            logger.info("Incidentes de usuario %s disociados para estadísticas históricas", usuario_id)
+        except Exception as inc_err:
+            logger.warning("Aviso disociando incidentes de usuario %s: %s", usuario_id, inc_err)
+
+        # 4. Eliminación de redes de apoyo y dispositivos de alerta temprana
+        try:
+            self._usuarios._query("red_apoyo").delete().or_(f"usu_id_victima.eq.{usuario_id},usu_id_contacto.eq.{usuario_id}").execute()
+            self._usuarios._query("dispositivo_usuario").delete().eq("usu_id_usuario", usuario_id).execute()
+            logger.info("Vínculos de red de apoyo y dispositivos eliminados para usuario %s", usuario_id)
+        except Exception as red_err:
+            logger.warning("Aviso eliminando red_apoyo/dispositivos para %s: %s", usuario_id, red_err)
+
+        # 5. Intentar ejecución atómica de disociación o limpieza en BD
+        try:
+            self._usuarios._query("usuario").update({
+                "usu_password_hash": None,
+            }).eq("usu_id_usuario", usuario_id).execute()
+        except Exception as u_err:
+            logger.debug("Aviso limpiando hash usuario %s: %s", usuario_id, u_err)
+
+        # 6. Eliminar usuario de GoTrue / auth.users para revocar cualquier acceso futuro
         try:
             self._auth.eliminar_usuario(usuario_id)
             logger.info("Usuario %s eliminado definitivamente de auth.users", usuario_id)

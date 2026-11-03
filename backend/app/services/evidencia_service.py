@@ -7,7 +7,6 @@
 # Normas: ISO/IEC 27037 (evidencia digital) e IETF RFC 3161 (TSP).
 # ─────────────────────────────────────────────────────────────────────────────
 
-import base64
 import hashlib
 import logging
 import math
@@ -22,13 +21,21 @@ from app.errors import (
     RecursoNoEncontradoError,
     ServicioExternoError,
 )
-from app.repositories.evidencia_repository import COLUMNAS_LISTADO, EvidenciaRepository
+from app.repositories.evidencia_repository import COLUMNAS_LISTADO, COLUMNAS_TESTIGOS, LISTADO_TESTIGOS, EvidenciaRepository
 from app.repositories.evidencia_storage import EvidenciaStorage
 from app.repositories.incidente_repository import IncidenteRepository
 from app.schemas.evidencias import SellarForenseRequest
 from app.schemas.incidentes import RegistrarEvidenciaRequest
 from app.services.access_control import AccessControlService
-from app.services.evidencia_cripto import descifrar_para_reproduccion, obtener_sobre_digital, tipo_medio_reproduccion
+from app.services.atestacion_hardware import verificar_firma_evidencia
+from app.services.evidencia_cripto import (
+    amr_a_wav,
+    descifrar_para_reproduccion,
+    es_audio_amr,
+    obtener_sobre_digital,
+    tiene_dek,
+    tipo_medio_reproduccion,
+)
 from app.services.roles import ROL_ADMINISTRADOR, ROL_AUTORIDAD
 from app.services.tsa_client import TSAClient
 
@@ -77,16 +84,19 @@ class EvidenciaService:
         if usuario and str(solicitud.usuario_id) != usuario["id"] and not es_operador:
             raise AccesoDenegadoError("Acceso denegado (Anti-IDOR): No puede sellar evidencias en nombre de otro usuario.")
 
-        incidente_id = str(solicitud.incidente_id)
+        incidente_id = str(solicitud.incidente_id) if solicitud.incidente_id else None
         usuario_id = str(solicitud.usuario_id)
         clean_hash = solicitud.hash_sha256.strip().lower()
 
-        incidente = self._incidentes.obtener_por_id(incidente_id, "inc_id_incidente, usu_id_victima, inc_estado")
-        if not incidente:
-            raise RecursoNoEncontradoError(f"Incidente {incidente_id} no encontrado.")
-        victima_id = incidente.get("usu_id_victima") or incidente.get("victima_id")
-        if str(victima_id) != usuario_id and not es_operador:
-            raise AccesoDenegadoError("Acceso denegado (Anti-IDOR): El usuario no coincide con la víctima del incidente.")
+        if incidente_id:
+            incidente = self._incidentes.obtener_por_id(incidente_id, "inc_id_incidente, usu_id_victima, inc_estado")
+            if not incidente:
+                raise RecursoNoEncontradoError(f"Incidente {incidente_id} no encontrado.")
+            victima_id = incidente.get("usu_id_victima") or incidente.get("victima_id")
+            if str(victima_id) != usuario_id and not es_operador:
+                raise AccesoDenegadoError("Acceso denegado (Anti-IDOR): El usuario no coincide con la víctima del incidente.")
+        elif not usuario or usuario_id != usuario["id"]:
+            raise AccesoDenegadoError("Acceso denegado (Anti-IDOR): La evidencia de testigo sólo puede registrarla su autor.")
 
         prev_hash = self.obtener_prev_hash()
 
@@ -97,7 +107,7 @@ class EvidenciaService:
             logger.error("Error crítico en comunicación con TSA: %s", exc)
             raise ServicioExternoError(f"Error obteniendo sello de tiempo RFC 3161: {exc}")
 
-        evidencia_creada = self._evidencias.insertar({
+        datos_evidencia = {
             "inc_id_incidente": incidente_id,
             "usu_id_usuario": usuario_id,
             "evi_tipo_archivo": solicitud.tipo_archivo,
@@ -108,7 +118,11 @@ class EvidenciaService:
             "evi_prev_hash": prev_hash,
             "evi_metadata_dispositivo": solicitud.metadata_dispositivo,
             "evi_fecha_captura": solicitud.fecha_captura,
-        })
+        }
+        if not incidente_id:
+            datos_evidencia["evi_origen_captura"] = "testigo"
+
+        evidencia_creada = self._evidencias.insertar(datos_evidencia)
         if not evidencia_creada:
             raise ErrorInternoError("Error persistiendo la evidencia en la base de datos.")
 
@@ -147,7 +161,7 @@ class EvidenciaService:
 
         clean_hash = solicitud.hash_sha256.lower()
         prev_hash = self.obtener_prev_hash()
-        firma_hw = solicitud.firma_hardware or f"TEE_KEYSTORE_SIG_P256:{clean_hash[:16]}"
+        firma_hw = solicitud.firma_hardware or f"SIN_FIRMA_HARDWARE:{clean_hash[:16]}"
 
         token_rfc3161 = None
         tsa_info = None
@@ -221,7 +235,8 @@ class EvidenciaService:
             verificacion_tsa = self._tsa.verificar_token_rfc3161(token_rfc3161, hash_registrado)
             verificacion_tsa["presente"] = True
 
-        verificacion_firma_hw = self._verificar_firma_hardware(firma_hardware)
+        metadata = evidencia.get("evi_metadata_dispositivo") or evidencia.get("metadata_dispositivo") or {}
+        verificacion_firma_hw = self._verificar_firma_hardware(firma_hardware, hash_registrado, metadata)
         verificacion_cadena = self._verificar_cadena(prev_hash_actual, sincronizado_en)
 
         es_integro = (
@@ -272,22 +287,9 @@ class EvidenciaService:
         return resultado
 
     @staticmethod
-    def _verificar_firma_hardware(firma_hardware: Optional[str]) -> Dict[str, Any]:
-        resultado: Dict[str, Any] = {
-            "presente": bool(firma_hardware),
-            "longitud_bytes": 0,
-            "valido": False,
-            "tipo": "Android Keystore / TEE (secp256r1)",
-        }
-        if firma_hardware:
-            try:
-                firma = base64.b64decode(firma_hardware)
-                resultado["longitud_bytes"] = len(firma)
-                # Una firma ECDSA DER P-256 mide entre 64 y 74 bytes
-                resultado["valido"] = len(firma) >= 64
-            except Exception:
-                resultado["valido"] = len(firma_hardware) > 16
-        return resultado
+    def _verificar_firma_hardware(firma_hardware: Optional[str], hash_registrado: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Verifica la firma con los certificados de atestación incluidos en la evidencia."""
+        return verificar_firma_evidencia(firma_hardware, hash_registrado, metadata.get("firma_dispositivo"))
 
     def _verificar_cadena(self, prev_hash_actual: Optional[str], sincronizado_en: Optional[str]) -> Dict[str, Any]:
         resultado: Dict[str, Any] = {
@@ -332,8 +334,8 @@ class EvidenciaService:
             raise RecursoNoEncontradoError("El archivo multimedia no fue encontrado en Storage o está vacío.")
 
         sobre_digital = obtener_sobre_digital(evidencia.get("metadata_dispositivo"))
-        if not sobre_digital.get("dek_hex"):
-            logger.warning("Evidencia %s no contiene sobre_digital.dek_hex. Sirviendo binario directo.", evidencia_id)
+        if not tiene_dek(sobre_digital):
+            logger.warning("Evidencia %s no contiene clave de datos. Sirviendo binario directo.", evidencia_id)
         try:
             contenido = descifrar_para_reproduccion(paquete, sobre_digital)
         except Exception as exc:
@@ -341,20 +343,78 @@ class EvidenciaService:
             raise ContenidoNoProcesableError(f"Fallo en la desencriptación criptográfica: {exc}")
 
         formato = (sobre_digital.get("formato") or "").lower()
+        if es_audio_amr(contenido):
+            try:
+                contenido, formato = amr_a_wav(contenido), "wav"
+            except Exception as exc:
+                logger.error("Error preparando el audio AMR de la evidencia %s: %s", evidencia_id, exc)
+                raise ContenidoNoProcesableError(f"No se pudo preparar el audio para reproducirlo: {exc}")
+
         tipo_archivo = (evidencia.get("tipo_archivo") or "").lower()
         media_type, extension = tipo_medio_reproduccion(tipo_archivo, formato)
         return ContenidoMultimedia(contenido=contenido, media_type=media_type, extension=extension)
 
     # ── Listado y consentimiento ─────────────────────────────────────────────
 
-    def listar_evidencias_incidente(self, incidente_id: str, page: int, limit: int, usuario: Dict[str, Any]) -> Dict[str, Any]:
+    def listar_evidencias_incidente(
+        self,
+        incidente_id: str,
+        page: int,
+        limit: int,
+        usuario: Dict[str, Any],
+        desde: Optional[str] = None,
+        hasta: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Separación entre metadatos forenses y contenido multimedia: sin
         consentimiento válido (o para el Administrador de TI) se oculta la URL.
+        Con `LISTADO_TESTIGOS` devuelve los registros de testigos para la Autoridad,
+        anónimos, sin datos técnicos del dispositivo y sin acceso al contenido.
         """
+        roles = usuario.get("roles", [])
+        offset = max(0, (page - 1) * limit)
+
+        if incidente_id == LISTADO_TESTIGOS:
+            if ROL_AUTORIDAD not in roles:
+                raise AccesoDenegadoError("Acceso denegado: Solo la Autoridad puede consultar los registros de testigos.")
+
+            instante = lambda valor: datetime.fromisoformat(valor.replace("Z", "+00:00"))
+            registros = []
+            for ev in self._evidencias.listar_por_incidente(LISTADO_TESTIGOS, COLUMNAS_TESTIGOS, descendente=True):
+                captura = instante(ev["evi_fecha_captura"])
+                if (desde and captura < instante(desde)) or (hasta and captura > instante(hasta)):
+                    continue
+                metadata = ev.get("evi_metadata_dispositivo") or {}
+                incidente_asociado = ev.get("inc_id_incidente")
+                consentimiento = bool(ev.get("evi_consentimiento_exportacion"))
+                if consentimiento and incidente_asociado:
+                    incidente = self._incidentes.obtener_por_id(str(incidente_asociado), "inc_consentimiento_exportacion")
+                    consentimiento = bool(incidente and incidente.get("inc_consentimiento_exportacion"))
+                registros.append({
+                    "id": ev.get("evi_id_evidencia"),
+                    "incidente_id": incidente_asociado,
+                    "tipo_archivo": ev.get("evi_tipo_archivo"),
+                    "fecha_captura": ev.get("evi_fecha_captura"),
+                    "latitud": metadata.get("latitud"),
+                    "longitud": metadata.get("longitud"),
+                    "hash_sha256": ev.get("evi_hash_sha256"),
+                    "prev_hash": ev.get("evi_prev_hash"),
+                    "token_rfc3161": ev.get("evi_token_rfc3161"),
+                    "consentimiento_exportacion": consentimiento,
+                    "fecha_consentimiento": ev.get("evi_fecha_consentimiento"),
+                })
+
+            return {
+                "status": "ok",
+                "total_registros": len(registros),
+                "total_paginas": max(1, math.ceil(len(registros) / limit)),
+                "pagina_actual": page,
+                "limite": limit,
+                "evidencias": registros[offset : offset + limit],
+            }
+
         incidente = self._acceso.verificar_acceso_incidente(incidente_id, usuario, accion="read")
 
-        roles = usuario.get("roles", [])
         es_admin_ti = ROL_ADMINISTRADOR in roles and ROL_AUTORIDAD not in roles
         consentimiento_incidente = bool(incidente.get("inc_consentimiento_exportacion", incidente.get("consentimiento_exportacion", False)))
 
@@ -372,6 +432,7 @@ class EvidenciaService:
             item["firma_hardware"] = item.get("evi_firma_hardware")
             item["fecha_captura"] = item.get("evi_fecha_captura")
             item["sincronizado_en"] = item.get("evi_sincronizado_en")
+            item["origen_captura"] = item.get("evi_origen_captura")
             ev_consent = item.get("evi_consentimiento_exportacion") if "evi_consentimiento_exportacion" in item else item.get("consentimiento_exportacion", True)
             item["fecha_consentimiento"] = item.get("evi_fecha_consentimiento") or item.get("fecha_consentimiento")
 
@@ -386,7 +447,6 @@ class EvidenciaService:
             filtradas.append(item)
 
         total_registros = len(filtradas)
-        offset = max(0, (page - 1) * limit)
         return {
             "status": "ok",
             "incidente_id": incidente_id,

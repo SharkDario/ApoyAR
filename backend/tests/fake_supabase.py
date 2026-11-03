@@ -42,6 +42,9 @@ def _match(row, f):
     elif kind == "ilike":
         rx = "^" + re.escape(val).replace("%", ".*") + "$"
         ok = rv is not None and re.match(rx, str(rv), re.I | re.S) is not None
+    elif kind == "like":
+        rx = "^" + re.escape(val).replace("%", ".*") + "$"
+        ok = rv is not None and re.match(rx, str(rv), re.S) is not None
     elif kind == "is":
         ok = rv is None if val == "null" else rv == val
     elif kind == "or":
@@ -95,6 +98,7 @@ class Query:
     def lte(self, c, v): return self._f("lte", c, v)
     def in_(self, c, v): return self._f("in", c, list(v))
     def ilike(self, c, v): return self._f("ilike", c, v)
+    def like(self, c, v): return self._f("like", c, v)
     def is_(self, c, v): return self._f("is", c, v)
     def or_(self, expr): return self._f("or", None, expr)
 

@@ -21,12 +21,14 @@ from app.dependencies import (
     get_supervision_service,
 )
 from app.schemas.admin import (
+    ActualizarOperadorRequest,
     AgregarRolRequest,
     AsociarEvidenciaRequest,
     CambiarCargoActivoRequest,
     CambiarEstadoCuentaRequest,
     CambiarPasswordRequest,
     ConfirmarRecuperacionRequest,
+    CorrelacionarIncidentesRequest,
     CrearOperadorRequest,
     LoginInstitucionalRequest,
     LoginMovilRequest,
@@ -221,17 +223,32 @@ async def buscar_usuarios_existentes(
 
 @router.get(
     "/admin/usuarios",
-    summary="Listar operadores institucionales con paginación de 10 en 10 y filtro activo/inactivo (Solo Administrador)",
-    description="Permite auditar operadores institucionales en funciones o inactivos con paginación estricta de 10 registros por página.",
+    summary="Listar operadores institucionales con paginación de 10 en 10, filtro activo/inactivo y búsqueda (Solo Administrador)",
+    description="Permite auditar operadores institucionales en funciones o inactivos con paginación estricta de 10 registros por página y búsqueda multi-campo.",
 )
 async def listar_usuarios_admin(
     page: int = 1,
     limit: int = 10,
     estado: Optional[str] = None,
+    search: Optional[str] = Query(default=None, description="Búsqueda por nombre, apellido, DNI, email, institución o cargo"),
     admin_user: Dict[str, Any] = Depends(solo_administrador),
     service: OperadorService = Depends(get_operador_service),
 ):
-    return service.listar_operadores(page, limit, estado)
+    return service.listar_operadores(page, limit, estado, search)
+
+
+@router.put(
+    "/admin/usuarios/{usuario_id}",
+    summary="Actualizar datos y adscripción de operador institucional (Solo Administrador)",
+    description="Permite a los administradores editar la información personal, adscripción institucional (institución, dependencia, sede, cargo, legajo) y notas del operador.",
+)
+async def actualizar_operador_institucional(
+    usuario_id: str,
+    body: ActualizarOperadorRequest,
+    admin_user: Dict[str, Any] = Depends(solo_administrador),
+    service: OperadorService = Depends(get_operador_service),
+):
+    return service.actualizar_operador(usuario_id, body, admin_user)
 
 
 @router.post(
@@ -376,3 +393,19 @@ async def asociar_evidencia_a_incidente(
     service: SupervisionService = Depends(get_supervision_service),
 ):
     return service.asociar_evidencia(body, current_op)
+
+
+@router.post(
+    "/autoridad/correlacionar-incidentes",
+    summary="Correlación formal espaciotemporal entre incidentes afines (RF-3.6 / CU-10)",
+    description="""
+    Permite vincular formalmente dos incidentes coexistentes en una misma área geográfica y tiempo,
+    asentando la justificación pericial en el expediente judicial de auditoría.
+    """,
+)
+async def correlacionar_incidentes_haversine(
+    body: CorrelacionarIncidentesRequest,
+    current_op: Dict[str, Any] = Depends(autoridad_o_administrador),
+    service: SupervisionService = Depends(get_supervision_service),
+):
+    return service.correlacionar_incidentes(body, current_op)

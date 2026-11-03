@@ -39,6 +39,7 @@ import {
   Search,
   ChevronRight,
   ChevronLeft,
+  ChevronDown,
   X,
   Lock,
   Layers,
@@ -64,6 +65,10 @@ import {
   Phone,
   User,
   Play,
+  Pencil,
+  Compass,
+  Sliders,
+  Link2,
 } from 'lucide-react';
 import { supabase } from './src/lib/supabase';
 import { MapViewComponent, type IncidentMarker } from './src/components/MapViewComponent';
@@ -113,9 +118,24 @@ export interface EvidenciaItem {
   prev_hash: string | null;
   fecha_captura: string;
   metadata_dispositivo?: any;
+  origen_captura?: string | null;
   consentimiento_exportacion?: boolean;
   fecha_consentimiento?: string | null;
   bloqueado_sin_consentimiento?: boolean;
+}
+
+export interface RegistroTestigo {
+  id: string;
+  incidente_id: string | null;
+  tipo_archivo: string;
+  fecha_captura: string;
+  latitud: number | null;
+  longitud: number | null;
+  hash_sha256: string;
+  prev_hash: string | null;
+  token_rfc3161: string | null;
+  consentimiento_exportacion: boolean;
+  fecha_consentimiento: string | null;
 }
 
 // ── Helpers de Formateo y Sincronización Segura de Datos ─────────────────────
@@ -131,6 +151,15 @@ export const formatOrigen = (origen?: string): string => {
   if (lower === 'manual') return 'Manual';
   if (lower === 'automatico' || lower === 'acustico') return 'Acústico';
   return origen.charAt(0).toUpperCase() + origen.slice(1);
+};
+
+// Las evidencias anteriores a la opción "Soy testigo" no traen esta marca y son de la víctima
+export const formatOrigenCaptura = (origenCaptura?: string | null): string =>
+  origenCaptura === 'testigo' ? 'Testigo' : 'Víctima';
+
+export const formatTipoArchivo = (tipoArchivo?: string | null): string => {
+  const tipo = String(tipoArchivo || 'archivo');
+  return tipo.charAt(0).toUpperCase() + tipo.slice(1);
 };
 
 export const mergeIncidente = (oldInc: IncidenteItem, rawNew: any): IncidenteItem => {
@@ -430,6 +459,90 @@ export default function App() {
   const [inactivosTotalPages, setInactivosTotalPages] = useState(1);
   const [inactivosTotalRegistros, setInactivosTotalRegistros] = useState(0);
 
+  // Barra de Búsqueda y Filtrado de Operadores Institucionales (institución, cargo, DNI, nombre, apellido, email)
+  const [operadoresSearchQuery, setOperadoresSearchQuery] = useState('');
+
+  // Modal para Editar Operador Institucional
+  const [showEditOperatorModal, setShowEditOperatorModal] = useState(false);
+  const [targetEditOperator, setTargetEditOperator] = useState<any | null>(null);
+  const [editNombre, setEditNombre] = useState('');
+  const [editApellido, setEditApellido] = useState('');
+  const [editDni, setEditDni] = useState('');
+  const [editTelefono, setEditTelefono] = useState('');
+  const [editDireccion, setEditDireccion] = useState('');
+  const [editGenero, setEditGenero] = useState<'Femenino' | 'Masculino' | 'No binario'>('Femenino');
+  const [editFechaNac, setEditFechaNac] = useState('');
+  const [editNotas, setEditNotas] = useState('');
+  const [editInstitucionId, setEditInstitucionId] = useState<number | null>(1);
+  const [editDependenciaId, setEditDependenciaId] = useState<number | null>(103);
+  const [editSedeId, setEditSedeId] = useState<number | null>(1004);
+  const [editCargoId, setEditCargoId] = useState<number | null>(3);
+  const [editLegajo, setEditLegajo] = useState('');
+  const [guardandoOperador, setGuardandoOperador] = useState(false);
+
+  // ── RF-3.6 / CU-10: Correlación Espaciotemporal de Evidencias Comunitarias (Haversine) ────
+  const [showHaversineModal, setShowHaversineModal] = useState(false);
+  const [haversineIncidenteRef, setHaversineIncidenteRef] = useState<IncidenteItem | null>(null);
+  const [haversineLatitud, setHaversineLatitud] = useState<number>(-26.185);
+  const [haversineLongitud, setHaversineLongitud] = useState<number>(-58.175);
+  const [haversineFechaHora, setHaversineFechaHora] = useState<string>(new Date().toISOString());
+  const [haversineRadioMetros, setHaversineRadioMetros] = useState<number>(500);
+  const [haversineVentanaMinutos, setHaversineVentanaMinutos] = useState<number>(30);
+  const [haversineLoading, setHaversineLoading] = useState(false);
+  const [haversineResultados, setHaversineResultados] = useState<any[]>([]);
+  const [haversineTotalSugerencias, setHaversineTotalSugerencias] = useState(0);
+  const [haversineExpandidos, setHaversineExpandidos] = useState<Record<string, boolean>>({});
+  const [haversineTestigoRef, setHaversineTestigoRef] = useState<RegistroTestigo | null>(null);
+  const [haversineEvidencias, setHaversineEvidencias] = useState<Record<string, { cargando: boolean; items: EvidenciaItem[] }>>({});
+
+  // Pestaña Testigos
+  const [verTestigos, setVerTestigos] = useState(false);
+  const [testigos, setTestigos] = useState<RegistroTestigo[]>([]);
+  const [testigosPage, setTestigosPage] = useState(1);
+  const [testigosTotalPages, setTestigosTotalPages] = useState(1);
+  const [testigosTotalRegistros, setTestigosTotalRegistros] = useState(0);
+  const [cargandoTestigos, setCargandoTestigos] = useState(false);
+  const [testigoSeleccionado, setTestigoSeleccionado] = useState<RegistroTestigo | null>(null);
+
+  // Agrupa las evidencias bajo su incidente; las de testigos sin incidente quedan aparte
+  const haversineGrupos = useMemo(() => {
+    const grupos = new Map<string, any>();
+    const testigosSinIncidente: any[] = [];
+
+    haversineResultados.forEach((sug) => {
+      if (sug.evidencia_id && sug.evidencia_id === haversineTestigoRef?.id) return;
+
+      if (sug.tipo === 'incidente') {
+        grupos.set(sug.incidente_id, { ...sug, dentro_del_rango: true, evidencias: grupos.get(sug.incidente_id)?.evidencias || [] });
+      } else if (sug.incidente_id) {
+        const grupo = grupos.get(sug.incidente_id) || {
+          ...sug.incidente,
+          tipo: 'incidente',
+          incidente_id: sug.incidente_id,
+          distancia_metros: sug.distancia_metros,
+          diferencia_minutos: sug.diferencia_minutos,
+          dentro_del_rango: false,
+          evidencias: [],
+        };
+        grupo.evidencias.push(sug);
+        grupos.set(sug.incidente_id, grupo);
+      } else {
+        testigosSinIncidente.push(sug);
+      }
+    });
+
+    return {
+      incidentes: Array.from(grupos.values()).sort((a, b) => a.distancia_metros - b.distancia_metros),
+      testigosSinIncidente,
+    };
+  }, [haversineResultados, haversineTestigoRef?.id]);
+
+  // Modal para Justificación Pericial y Operativa (Asociación Asistida)
+  const [showJustificacionModal, setShowJustificacionModal] = useState(false);
+  const [justificacionTarget, setJustificacionTarget] = useState<any | null>(null);
+  const [justificacionTexto, setJustificacionTexto] = useState('');
+  const [asociandoEvidencia, setAsociandoEvidencia] = useState(false);
+
   // Catálogos 3FN Formosa
   const [instituciones, setInstituciones] = useState<any[]>([]);
   const [dependencias, setDependencias] = useState<any[]>([]);
@@ -722,14 +835,20 @@ export default function App() {
     cargarCatalogosInstitucionales();
   }, [cargarCatalogosInstitucionales]);
 
-  // Consultar Operadores Activos o Inactivos con Paginación de 10 en 10
+  // Consultar Operadores Activos o Inactivos con Paginación de 10 en 10 y Búsqueda
   const cargarUsuariosAdmin = useCallback(
-    async (tab: 'activos' | 'inactivos' = adminTab === 'inactivos' ? 'inactivos' : 'activos', page?: number) => {
+    async (
+      tab: 'activos' | 'inactivos' = adminTab === 'inactivos' ? 'inactivos' : 'activos',
+      page?: number,
+      searchQuery?: string
+    ) => {
       if (!session) return;
       setLoadingUsers(true);
       const targetPage = page !== undefined ? page : (tab === 'activos' ? operadoresPage : inactivosPage);
+      const targetSearch = searchQuery !== undefined ? searchQuery : operadoresSearchQuery;
+      const searchParam = targetSearch.trim() ? `&search=${encodeURIComponent(targetSearch.trim())}` : '';
       try {
-        const res = await fetch(`${apiBaseUrl}/api/v1/admin/usuarios?estado=${tab}&page=${targetPage}&limit=10`, {
+        const res = await fetch(`${apiBaseUrl}/api/v1/admin/usuarios?estado=${tab}&page=${targetPage}&limit=10${searchParam}`, {
           headers: {
             Authorization: `Bearer ${session.access_token}`,
           },
@@ -754,7 +873,7 @@ export default function App() {
         setLoadingUsers(false);
       }
     },
-    [session, apiBaseUrl, adminTab, operadoresPage, inactivosPage]
+    [session, apiBaseUrl, adminTab, operadoresPage, inactivosPage, operadoresSearchQuery]
   );
 
   // Búsqueda en vivo de usuarios civiles para vinculación
@@ -969,7 +1088,7 @@ export default function App() {
           setShowAddAutoridadModal(false);
           setTargetAddRoleUser(null);
           setAddAutoridadLegajo('');
-          showToast('Rol Asignado', 'Rol Autoridad asignado exitosamente con adscripción institucional 3FN.', 'success');
+          showToast('Rol Asignado', 'Rol Autoridad asignado exitosamente con adscripción institucional.', 'success');
           cargarUsuariosAdmin('activos');
         } catch (err: any) {
           showToast('Error de Asignación', err.message || 'Error asignando rol', 'error');
@@ -1035,6 +1154,610 @@ export default function App() {
         }
       },
     });
+  };
+
+  // ── Edición de Operador Institucional (RF Gestión de Operadores) ───────────
+  const handleAbrirEditarOperador = (usr: any) => {
+    setTargetEditOperator(usr);
+    setEditNombre(usr.nombre || '');
+    setEditApellido(usr.apellido || '');
+    setEditDni(usr.dni && usr.dni !== 'Sin DNI registrado' ? usr.dni : '');
+    setEditTelefono(usr.telefono && usr.telefono !== 'Sin teléfono' ? usr.telefono : '');
+    setEditDireccion(usr.direccion && usr.direccion !== 'Sin dirección declarada' ? usr.direccion : '');
+    setEditGenero(usr.genero === 'Masculino' || usr.genero === 'No binario' ? usr.genero : 'Femenino');
+    setEditFechaNac(usr.fecha_nacimiento || '');
+    setEditNotas(usr.notas || '');
+
+    // La sede determina la dependencia y la institución reales del operador
+    const instMatch = instituciones.find((i) => i.nombre === usr.institucion);
+    const iId = instMatch?.id_institucion ?? instituciones[0]?.id_institucion ?? null;
+    const depMatch =
+      dependencias.find((d) => d.nombre === usr.dependencia && d.id_institucion === iId) ||
+      dependencias.find((d) => d.id_institucion === iId);
+    const dId = depMatch?.id_dependencia ?? null;
+    const sedesDep = sedes.filter((s) => s.id_dependencia === dId);
+    const sedeMatch = sedesDep.find((s) => `${s.nombre_sede} (${s.direccion})` === usr.sede) || sedesDep[0];
+    setEditInstitucionId(iId);
+    setEditDependenciaId(dId);
+    setEditSedeId(sedeMatch?.id_sede ?? null);
+
+    const cargoMatch = cargos.find((c) => c.nombre_cargo === usr.cargo);
+    setEditCargoId(cargoMatch?.id_cargo ?? cargos[0]?.id_cargo ?? null);
+
+    setEditLegajo(usr.legajo || '');
+    setShowEditOperatorModal(true);
+  };
+
+  const handleGuardarEditarOperador = async () => {
+    if (!targetEditOperator) return;
+    setGuardandoOperador(true);
+    try {
+      const payload: any = {
+        nombre: editNombre.trim(),
+        apellido: editApellido.trim(),
+        dni: editDni.trim() || undefined,
+        telefono: editTelefono.trim() || undefined,
+        direccion: editDireccion.trim() || undefined,
+        genero: editGenero,
+        fecha_nacimiento: editFechaNac.trim() || undefined,
+        notas: editNotas.trim() || undefined,
+        id_institucion: editInstitucionId,
+        id_dependencia: editDependenciaId,
+        id_sede: editSedeId,
+        id_cargo: editCargoId,
+        legajo_o_matricula: editLegajo.trim() || undefined,
+      };
+
+      const res = await fetch(`${apiBaseUrl}/api/v1/admin/usuarios/${targetEditOperator.usuario_id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session?.access_token}`,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.detail || 'Error actualizando operador institucional');
+      }
+
+      showToast('Operador Actualizado', 'Los datos y adscripción institucional han sido actualizados con éxito.', 'success');
+      setShowEditOperatorModal(false);
+      cargarUsuariosAdmin(adminTab === 'inactivos' ? 'inactivos' : 'activos', adminTab === 'activos' ? operadoresPage : inactivosPage);
+    } catch (err: any) {
+      showToast('Error de Actualización', err.message || 'No se pudieron guardar los cambios', 'error');
+    } finally {
+      setGuardandoOperador(false);
+    }
+  };
+
+  // ── RF-3.6 / CU-10: Correlación Espaciotemporal (Haversine) ─────────────────
+  const handleAbrirCorrelacionHaversine = (inc: IncidenteItem) => {
+    setHaversineTestigoRef(null);
+    setHaversineIncidenteRef(inc);
+    setHaversineLatitud(Number(inc.latitud));
+    setHaversineLongitud(Number(inc.longitud));
+    setHaversineFechaHora(inc.fecha_hora);
+    setHaversineExpandidos({});
+    setHaversineEvidencias({});
+    setShowHaversineModal(true);
+    ejecutarCorrelacionHaversine(
+      Number(inc.latitud),
+      Number(inc.longitud),
+      inc.fecha_hora,
+      haversineRadioMetros,
+      haversineVentanaMinutos,
+      inc.id
+    );
+  };
+
+  // La misma correlación, tomando como punto de partida el registro del testigo
+  const handleBuscarIncidentesCercanos = (testigo: RegistroTestigo) => {
+    if (testigo.latitud === null || testigo.longitud === null) return;
+    setHaversineIncidenteRef(null);
+    setHaversineTestigoRef(testigo);
+    setHaversineLatitud(testigo.latitud);
+    setHaversineLongitud(testigo.longitud);
+    setHaversineFechaHora(testigo.fecha_captura);
+    setHaversineExpandidos({});
+    setHaversineEvidencias({});
+    setShowHaversineModal(true);
+    ejecutarCorrelacionHaversine(
+      testigo.latitud,
+      testigo.longitud,
+      testigo.fecha_captura,
+      haversineRadioMetros,
+      haversineVentanaMinutos,
+      null
+    );
+  };
+
+  const ejecutarCorrelacionHaversine = async (
+    lat = haversineLatitud,
+    lon = haversineLongitud,
+    fh = haversineFechaHora,
+    radio = haversineRadioMetros,
+    ventana = haversineVentanaMinutos,
+    incId: string | null | undefined = haversineIncidenteRef?.id
+  ) => {
+    if (!session) return;
+    setHaversineLoading(true);
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/v1/autoridad/sugerencias-coincidencias`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          latitud: lat,
+          longitud: lon,
+          fecha_hora: fh,
+          radio_metros: radio,
+          ventana_minutos: ventana,
+          incidente_id: incId,
+        }),
+      });
+
+      if (res.ok) {
+        const j = await res.json();
+        setHaversineResultados(j.sugerencias || []);
+        setHaversineTotalSugerencias(j.cantidad_sugerencias || 0);
+      } else {
+        const errJ = await res.json().catch(() => ({}));
+        showToast('Error de Correlación', errJ.detail || 'Error calculando correlación espaciotemporal', 'error');
+      }
+    } catch (e: any) {
+      console.error('Error calculando Haversine:', e);
+      showToast('Error de Red', e.message || 'No se pudo conectar con el servicio de análisis', 'error');
+    } finally {
+      setHaversineLoading(false);
+    }
+  };
+
+  const handleCerrarCorrelacion = () => {
+    handleCerrarReproductor();
+    setShowHaversineModal(false);
+  };
+
+  // Las evidencias se piden al desplegar: incluyen las que quedan fuera del rango de búsqueda
+  const handleAlternarEvidenciasHaversine = async (incidenteId: string) => {
+    const abrir = !haversineExpandidos[incidenteId];
+    setHaversineExpandidos((prev) => ({ ...prev, [incidenteId]: abrir }));
+    if (!abrir || haversineEvidencias[incidenteId]) return;
+
+    setHaversineEvidencias((prev) => ({ ...prev, [incidenteId]: { cargando: true, items: [] } }));
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/v1/evidencias/incidente/${incidenteId}?page=1&limit=50`, {
+        headers: { Authorization: `Bearer ${session?.access_token}` },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      setHaversineEvidencias((prev) => ({ ...prev, [incidenteId]: { cargando: false, items: json.evidencias || [] } }));
+    } catch (err: any) {
+      setHaversineEvidencias((prev) => {
+        const { [incidenteId]: _, ...resto } = prev;
+        return resto;
+      });
+      setHaversineExpandidos((prev) => ({ ...prev, [incidenteId]: false }));
+      showToast('Error de Evidencias', err.message || 'No se pudieron consultar las evidencias.', 'error');
+    }
+  };
+
+  const handleIniciarVinculacionHaversine = (sug: any) => {
+    const destinoIncId = haversineTestigoRef ? sug.incidente_id : haversineIncidenteRef?.id || selectedIncidente?.id;
+    if (!destinoIncId) {
+      showToast('Selección Requerida', 'Se requiere tener un incidente seleccionado.', 'warning');
+      return;
+    }
+    setJustificacionTarget(haversineTestigoRef ? { ...sug, tipo: 'evidencia_comunitaria', evidencia_id: haversineTestigoRef.id } : sug);
+    setJustificacionTexto('');
+    setShowJustificacionModal(true);
+  };
+
+  const handleConfirmarVinculacionFormal = async () => {
+    if (!justificacionTarget) return;
+    if (!justificacionTexto || justificacionTexto.trim().length < 10) {
+      showToast('Motivo Insuficiente', 'El motivo debe contener al menos 10 caracteres.', 'warning');
+      return;
+    }
+
+    const destinoIncId = haversineTestigoRef ? justificacionTarget.incidente_id : haversineIncidenteRef?.id || selectedIncidente?.id;
+    setAsociandoEvidencia(true);
+    try {
+      if (justificacionTarget.tipo === 'evidencia_comunitaria' && justificacionTarget.evidencia_id) {
+        const res = await fetch(`${apiBaseUrl}/api/v1/autoridad/asociar-evidencia`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session?.access_token}`,
+          },
+          body: JSON.stringify({
+            evidencia_id: justificacionTarget.evidencia_id,
+            incidente_id: destinoIncId,
+            justificacion_operativa: justificacionTexto.trim(),
+          }),
+        });
+        if (!res.ok) {
+          const errJ = await res.json().catch(() => ({}));
+          throw new Error(errJ.detail || 'Error asociando evidencia al incidente');
+        }
+        showToast('Evidencia Asociada', 'El registro del testigo quedó asociado al incidente. La valoración corresponde a los profesionales del caso.', 'success');
+      } else {
+        const res = await fetch(`${apiBaseUrl}/api/v1/autoridad/correlacionar-incidentes`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session?.access_token}`,
+          },
+          body: JSON.stringify({
+            incidente_origen_id: destinoIncId,
+            incidente_destino_id: justificacionTarget.incidente_id,
+            justificacion_operativa: justificacionTexto.trim(),
+          }),
+        });
+        if (!res.ok) {
+          const errJ = await res.json().catch(() => ({}));
+          throw new Error(errJ.detail || 'Error al registrar la relación entre incidentes');
+        }
+        showToast('Relación Registrada', 'La posible relación entre los incidentes quedó registrada en las notas del caso.', 'success');
+      }
+      setShowJustificacionModal(false);
+      setJustificacionTarget(null);
+      setJustificacionTexto('');
+      if (haversineTestigoRef) {
+        setShowHaversineModal(false);
+        setHaversineTestigoRef(null);
+      } else {
+        ejecutarCorrelacionHaversine();
+      }
+      cargarTestigos(testigosPage);
+      cargarIncidentes();
+    } catch (err: any) {
+      showToast('Error al Relacionar', err.message || 'No se pudo registrar la relación.', 'error');
+    } finally {
+      setAsociandoEvidencia(false);
+    }
+  };
+
+  // Pestaña Testigos: registros sin datos de quien los aportó
+  const renderListaTestigos = () => {
+    if (cargandoTestigos && testigos.length === 0) {
+      return (
+        <View style={styles.centerBox}>
+          <ActivityIndicator size="large" color={colors.border.focus} />
+          <Text style={[styles.loadingText, { color: colors.text.secondary }]}>Cargando registros de testigos...</Text>
+        </View>
+      );
+    }
+
+    if (testigos.length === 0) {
+      return (
+        <View style={styles.centerBox}>
+          <Users size={36} color={colors.text.disabled} style={{ marginBottom: 8 }} />
+          <Text style={[styles.emptyTitle, { color: colors.text.primary }]}>Sin registros de testigos</Text>
+          <Text style={[styles.emptySubtitle, { color: colors.text.secondary }]}>
+            No se encontraron registros para el rango de fechas seleccionado.
+          </Text>
+        </View>
+      );
+    }
+
+    return (
+      <FlatList
+        data={testigos}
+        keyExtractor={(item) => item.id}
+        contentContainerStyle={{ padding: spacing.sm }}
+        renderItem={({ item }) => {
+          const isSelected = testigoSeleccionado?.id === item.id;
+          const asociado = Boolean(item.incidente_id);
+          return (
+            <TouchableOpacity
+              style={[
+                styles.incidentCard,
+                {
+                  backgroundColor: isSelected ? colors.bg.elevated : colors.bg.base,
+                  borderColor: isSelected ? colors.border.focus : colors.border.default,
+                  borderLeftColor: '#3B82F6',
+                },
+              ]}
+              onPress={() => setTestigoSeleccionado(item)}
+            >
+              <View style={styles.cardHeader}>
+                <View style={{ flex: 1, paddingRight: 6 }}>
+                  <Text style={[styles.victimName, { color: colors.text.primary }]} numberOfLines={1}>
+                    {formatTipoArchivo(item.tipo_archivo)} de testigo
+                  </Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>
+                    <MapPin size={12} color={colors.text.secondary} style={{ marginRight: 4 }} />
+                    <Text style={[styles.addressText, { color: colors.text.secondary }]} numberOfLines={1}>
+                      {item.latitud !== null && item.longitud !== null
+                        ? `${item.latitud.toFixed(5)}, ${item.longitud.toFixed(5)}`
+                        : 'Ubicación no disponible'}
+                    </Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 3 }}>
+                    <Clock size={11} color={colors.text.disabled} style={{ marginRight: 4 }} />
+                    <Text style={{ fontSize: 11, color: colors.text.disabled }}>
+                      {new Date(item.fecha_captura).toLocaleDateString()} • {new Date(item.fecha_captura).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} hs
+                    </Text>
+                  </View>
+                </View>
+
+                <View
+                  style={[
+                    styles.stateBadge,
+                    {
+                      backgroundColor: asociado ? colors.semantic.infoBg : colors.bg.overlay,
+                      borderColor: asociado ? colors.semantic.info : colors.border.default,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.stateBadgeText, { color: asociado ? colors.semantic.info : colors.text.secondary }]}>
+                    {asociado ? 'ASOCIADO' : 'SIN ASOCIAR'}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.cardFooter}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1 }}>
+                  {item.consentimiento_exportacion ? <Check size={12} color={colors.semantic.success} /> : <Lock size={12} color={colors.semantic.warning} />}
+                  <Text style={{ fontSize: 11, color: item.consentimiento_exportacion ? colors.semantic.success : colors.semantic.warning }}>
+                    {item.consentimiento_exportacion ? 'Con consentimiento' : 'Sin consentimiento'}
+                  </Text>
+                </View>
+                <View style={[styles.originTag, { backgroundColor: colors.bg.overlay }]}>
+                  <Text style={[styles.originTagText, { color: colors.text.secondary }]}>Testigo</Text>
+                </View>
+              </View>
+            </TouchableOpacity>
+          );
+        }}
+      />
+    );
+  };
+
+  const renderDrawerTestigo = () => {
+    if (!verTestigos || !testigoSeleccionado) return null;
+    const testigo = testigoSeleccionado;
+    const asociado = Boolean(testigo.incidente_id);
+    const tieneUbicacion = testigo.latitud !== null && testigo.longitud !== null;
+
+    return (
+      <View style={[styles.inspectionDrawer, { backgroundColor: colors.bg.surface, borderColor: colors.border.default, shadowColor: '#000' }]}>
+        <View style={styles.drawerHeader}>
+          <View style={{ flex: 1, paddingRight: 8 }}>
+            <Text style={[styles.drawerTitle, { color: colors.text.primary }]}>Registro de testigo</Text>
+            <Text style={[styles.drawerIdText, { color: colors.text.disabled }]}>ID: {testigo.id}</Text>
+          </View>
+          <TouchableOpacity style={[styles.drawerCloseBtn, { backgroundColor: colors.bg.elevated }]} onPress={() => setTestigoSeleccionado(null)}>
+            <X size={18} color={colors.text.secondary} />
+          </TouchableOpacity>
+        </View>
+
+        <View style={[styles.drawerInfoBlock, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
+          <View style={styles.infoRow}>
+            <FileText size={15} color={colors.semantic.info} style={{ marginRight: 6 }} />
+            <Text style={[styles.infoLabel, { color: colors.text.secondary }]}>Tipo:</Text>
+            <Text style={[styles.infoValue, { color: colors.text.primary }]}>{formatTipoArchivo(testigo.tipo_archivo)}</Text>
+          </View>
+          <View style={styles.infoRow}>
+            <Clock size={15} color={colors.text.secondary} style={{ marginRight: 6 }} />
+            <Text style={[styles.infoLabel, { color: colors.text.secondary }]}>Captura:</Text>
+            <Text style={[styles.infoValue, { color: colors.text.primary }]}>{new Date(testigo.fecha_captura).toLocaleString('es-AR')}</Text>
+          </View>
+          <View style={styles.infoRow}>
+            <MapPin size={15} color={colors.semantic.info} style={{ marginRight: 6 }} />
+            <Text style={[styles.infoLabel, { color: colors.text.secondary }]}>Coordenadas:</Text>
+            <Text style={[styles.infoValue, { color: colors.text.primary }]}>
+              {tieneUbicacion ? `${testigo.latitud!.toFixed(5)}, ${testigo.longitud!.toFixed(5)}` : 'No disponibles'}
+            </Text>
+          </View>
+          <View style={styles.infoRow}>
+            <Link2 size={15} color={colors.text.secondary} style={{ marginRight: 6 }} />
+            <Text style={[styles.infoLabel, { color: colors.text.secondary }]}>Estado:</Text>
+            <Text style={[styles.infoValue, { color: colors.text.primary }]}>
+              {asociado ? `Asociado al incidente #${testigo.incidente_id!.slice(0, 8)}` : 'Sin asociar'}
+            </Text>
+          </View>
+          <View style={styles.infoRow}>
+            {testigo.consentimiento_exportacion
+              ? <Check size={15} color={colors.semantic.success} style={{ marginRight: 6 }} />
+              : <Lock size={15} color={colors.semantic.warning} style={{ marginRight: 6 }} />}
+            <Text style={[styles.infoLabel, { color: colors.text.secondary }]}>Contenido:</Text>
+            <Text style={[styles.infoValue, { color: colors.text.primary }]}>
+              {testigo.consentimiento_exportacion ? 'Con consentimiento' : 'Sin consentimiento: solo se ven estos datos'}
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.drawerActions}>
+          <TouchableOpacity style={[styles.actionBtn, { backgroundColor: colors.semantic.info }]} onPress={() => handleAbrirAuditoriaTestigo(testigo)}>
+            <FileText size={15} color="#FFFFFF" style={{ marginRight: 6 }} />
+            <Text style={styles.actionBtnText}>Auditar Evidencias Forenses</Text>
+          </TouchableOpacity>
+
+          {!asociado && tieneUbicacion && (
+            <TouchableOpacity style={[styles.actionBtn, { backgroundColor: '#4F46E5' }]} onPress={() => handleBuscarIncidentesCercanos(testigo)}>
+              <Radio size={15} color="#FFFFFF" style={{ marginRight: 6 }} />
+              <Text style={styles.actionBtnText}>Correlación Espaciotemporal</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
+    );
+  };
+
+  const renderMetricasCoincidencia = (sug: any) => (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+        <Compass size={13} color="#3B82F6" />
+        <Text style={{ fontSize: 12, fontWeight: '700', color: colors.text.primary }}>
+          {Math.round(sug.distancia_metros)} m
+        </Text>
+      </View>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+        <Clock size={13} color="#F59E0B" />
+        <Text style={{ fontSize: 12, color: colors.text.secondary }}>
+          {Math.round(sug.diferencia_minutos)} min
+        </Text>
+      </View>
+    </View>
+  );
+
+  const renderEtiquetaParticipante = (etiqueta: string) => {
+    const esTestigo = etiqueta === 'Testigo';
+    return (
+      <View style={[styles.userRoleTag, { backgroundColor: esTestigo ? '#1E3A5F' : '#3B1D4A', borderColor: esTestigo ? '#3B82F6' : '#A855F7' }]}>
+        <Text style={{ fontSize: 11, fontWeight: '700', color: esTestigo ? '#BFDBFE' : '#E9D5FF' }}>{etiqueta}</Text>
+      </View>
+    );
+  };
+
+  const renderBotonVerEvidencia = (evidenciaId: string, tipoArchivo: string) => {
+    const abierta = activeReproduciendoEvidenciaId === evidenciaId;
+    return (
+      <TouchableOpacity
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: 6,
+          paddingHorizontal: 12,
+          paddingVertical: 6,
+          borderRadius: radii.sm,
+          backgroundColor: abierta ? colors.semantic.danger : colors.semantic.info,
+        }}
+        onPress={() => {
+          if (abierta) {
+            handleCerrarReproductor();
+          } else {
+            reproducirEvidenciaAsync(evidenciaId);
+          }
+        }}
+      >
+        {loadingMediaEvidenciaId === evidenciaId ? (
+          <ActivityIndicator size="small" color="#ffffff" />
+        ) : abierta ? (
+          <>
+            <X size={13} color="#ffffff" />
+            <Text style={{ color: '#ffffff', fontSize: 11, fontWeight: '700' }}>Cerrar Reproductor</Text>
+          </>
+        ) : (
+          <>
+            <Play size={13} color="#ffffff" />
+            <Text style={{ color: '#ffffff', fontSize: 11, fontWeight: '700' }}>
+              {tipoArchivo === 'video' ? 'Ver Video Desencriptado' : tipoArchivo === 'imagen' ? 'Ver Fotografía' : 'Escuchar Audio'}
+            </Text>
+          </>
+        )}
+      </TouchableOpacity>
+    );
+  };
+
+  const renderReproductorForense = (tipoArchivo: string) => {
+    if (!activeMediaUrl) return null;
+    return (
+      <View
+        style={{
+          marginTop: 10,
+          padding: 12,
+          backgroundColor: '#000000',
+          borderRadius: radii.md,
+          borderWidth: 1,
+          borderColor: colors.border.default,
+        }}
+      >
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <Text style={{ color: colors.semantic.success, fontSize: 11, fontWeight: '700' }}>
+            ✓ Verificación Forense: Integridad SHA-256 Validada
+          </Text>
+          <TouchableOpacity onPress={handleCerrarReproductor} style={{ padding: 4 }}>
+            <X size={16} color="#94A3B8" />
+          </TouchableOpacity>
+        </View>
+
+        {tipoArchivo === 'video' ? (
+          <video src={activeMediaUrl} controls autoPlay style={{ width: '100%', maxHeight: 380, borderRadius: 6, backgroundColor: '#000' }} />
+        ) : tipoArchivo === 'audio' ? (
+          <audio src={activeMediaUrl} controls autoPlay style={{ width: '100%', marginTop: 4 }} />
+        ) : (
+          <img
+            src={activeMediaUrl}
+            alt="Evidencia Forense Desencriptada"
+            style={{ maxWidth: '100%', maxHeight: 400, borderRadius: 6, objectFit: 'contain', display: 'block', margin: '0 auto' }}
+          />
+        )}
+      </View>
+    );
+  };
+
+  const renderEvidenciaDeCorrelacion = (
+    ev: Pick<EvidenciaItem, 'id' | 'tipo_archivo' | 'fecha_captura' | 'origen_captura' | 'bloqueado_sin_consentimiento'>,
+    coincidencia?: any
+  ) => {
+    const contenidoDisponible = !ev.bloqueado_sin_consentimiento;
+    return (
+      <View key={ev.id} style={{ gap: 6 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            {renderEtiquetaParticipante(formatOrigenCaptura(ev.origen_captura))}
+            <Text style={{ fontSize: 13, color: colors.text.primary, fontWeight: '500' }}>{formatTipoArchivo(ev.tipo_archivo)}</Text>
+          </View>
+          {coincidencia && renderMetricasCoincidencia(coincidencia)}
+        </View>
+        <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+          Captura: {new Date(ev.fecha_captura).toLocaleString('es-AR')}
+          {coincidencia ? ` • Coordenadas: ${Number(coincidencia.latitud).toFixed(5)}, ${Number(coincidencia.longitud).toFixed(5)}` : ''}
+        </Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1, minWidth: 200 }}>
+            {contenidoDisponible ? <Check size={13} color={colors.semantic.success} /> : <Lock size={13} color={colors.semantic.warning} />}
+            <Text style={{ flex: 1, fontSize: 11, fontWeight: '600', color: contenidoDisponible ? colors.semantic.success : colors.semantic.warning }}>
+              {contenidoDisponible ? 'Con consentimiento: el contenido se puede consultar.' : 'Sin consentimiento: solo se muestran estos datos, no el contenido.'}
+            </Text>
+          </View>
+          {contenidoDisponible && renderBotonVerEvidencia(ev.id, ev.tipo_archivo)}
+        </View>
+        {contenidoDisponible && activeReproduciendoEvidenciaId === ev.id && renderReproductorForense(ev.tipo_archivo)}
+      </View>
+    );
+  };
+
+  const renderAlternarEvidencias = (incidenteId: string, titulo: string) => {
+    const expandido = Boolean(haversineExpandidos[incidenteId]);
+    const estado = haversineEvidencias[incidenteId];
+    return (
+      <TouchableOpacity
+        style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}
+        onPress={() => handleAlternarEvidenciasHaversine(incidenteId)}
+        accessibilityLabel={expandido ? `Ocultar ${titulo}` : `Ver ${titulo}`}
+      >
+        {expandido ? <ChevronDown size={15} color={colors.text.primary} /> : <ChevronRight size={15} color={colors.text.primary} />}
+        <Text style={{ fontSize: 12, fontWeight: '600', color: colors.text.primary }}>
+          {titulo}{estado && !estado.cargando ? ` (${estado.items.length})` : ''}
+        </Text>
+      </TouchableOpacity>
+    );
+  };
+
+  const renderEvidenciasDeIncidente = (incidenteId: string, coincidencias: any[] = []) => {
+    if (!haversineExpandidos[incidenteId]) return null;
+    const estado = haversineEvidencias[incidenteId];
+    if (!estado || estado.cargando) return <ActivityIndicator size="small" color={colors.border.focus} />;
+    if (estado.items.length === 0) {
+      return <Text style={{ fontSize: 12, color: colors.text.secondary }}>Este incidente no tiene evidencias registradas.</Text>;
+    }
+
+    return (
+      <View style={{ gap: 8 }}>
+        {estado.items.map((ev) => (
+          <View key={ev.id} style={{ padding: 10, borderRadius: radii.sm, borderWidth: 1, borderColor: colors.border.default, backgroundColor: colors.bg.elevated }}>
+            {renderEvidenciaDeCorrelacion(ev, coincidencias.find((c) => c.evidencia_id === ev.id))}
+          </View>
+        ))}
+      </View>
+    );
   };
 
   // Recuperación de Contraseña Institucional (100% Gratis)
@@ -1318,6 +2041,53 @@ export default function App() {
     return () => clearInterval(interval);
   }, [session, incidentesPage, cargarIncidentes]);
 
+  // El backend entrega los registros anónimos: sin el autor ni los datos técnicos del dispositivo
+  const cargarTestigos = useCallback(
+    async (page: number = 1) => {
+      if (!session) return;
+      setCargandoTestigos(true);
+      try {
+        const parametros = new URLSearchParams({ page: String(page), limit: '10' });
+        if (filtroFechaInicio.trim()) {
+          parametros.set('desde', new Date(`${filtroFechaInicio.trim()}T00:00:00`).toISOString());
+        }
+        if (filtroFechaFin.trim()) {
+          parametros.set('hasta', new Date(`${filtroFechaFin.trim()}T23:59:59.999`).toISOString());
+        }
+
+        const res = await fetch(`${apiBaseUrl}/api/v1/evidencias/incidente/testigos?${parametros.toString()}`, {
+          headers: { Authorization: `Bearer ${session.access_token}` },
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+
+        const registros: RegistroTestigo[] = (json.evidencias || []).map((fila: any) => {
+          const tieneUbicacion = typeof fila.latitud === 'number' && typeof fila.longitud === 'number';
+          return {
+            ...fila,
+            latitud: tieneUbicacion ? fila.latitud : null,
+            longitud: tieneUbicacion ? fila.longitud : null,
+          };
+        });
+
+        setTestigos(registros);
+        setTestigosPage(json.pagina_actual || page);
+        setTestigosTotalRegistros(json.total_registros || 0);
+        setTestigosTotalPages(json.total_paginas || 1);
+        setTestigoSeleccionado((prev) => (prev ? registros.find((r) => r.id === prev.id) || prev : prev));
+      } catch (err) {
+        console.warn('[PanelWeb] Error cargando registros de testigos:', err);
+      } finally {
+        setCargandoTestigos(false);
+      }
+    },
+    [session, filtroFechaInicio, filtroFechaFin, apiBaseUrl]
+  );
+
+  useEffect(() => {
+    cargarTestigos(1);
+  }, [cargarTestigos]);
+
   // Sincronización en tiempo real vía Supabase Realtime Channels (PostgreSQL CDC)
   useEffect(() => {
     if (!session) return;
@@ -1369,6 +2139,10 @@ export default function App() {
         }
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'evidencia' }, (payload) => {
+        if ((payload.new as any)?.evi_origen_captura === 'testigo') {
+          cargarTestigos(testigosPage);
+        }
+
         if (payload.eventType === 'UPDATE' && payload.new) {
           const rawEv = payload.new;
           const rawEvId = rawEv.evi_id_evidencia || rawEv.id;
@@ -1401,7 +2175,7 @@ export default function App() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [session, incidentesPage, cargarIncidentes, selectedIncidente?.id, activeMediaUrl, activeReproduciendoEvidenciaId]);
+  }, [session, incidentesPage, cargarIncidentes, cargarTestigos, testigosPage, selectedIncidente?.id, activeMediaUrl, activeReproduciendoEvidenciaId]);
 
   // Inicio de Sesión Institucional (Verifica password_institucional_hash con protección contra fuerza bruta)
   const handleLogin = async () => {
@@ -1529,8 +2303,7 @@ export default function App() {
       incidenteAuditadoConsentimiento.consentimiento_exportacion &&
       (selectedIncidente ? selectedIncidente.consentimiento_exportacion !== false : true) &&
       ev.consentimiento_exportacion !== false &&
-      !ev.bloqueado_sin_consentimiento &&
-      ev.url_almacenamiento
+      !ev.bloqueado_sin_consentimiento
     );
     if (!tieneConsent) {
       showConfirmDialog({
@@ -1543,18 +2316,21 @@ export default function App() {
       });
       return;
     }
+    await reproducirEvidenciaAsync(ev.id);
+  };
+
+  const reproducirEvidenciaAsync = async (evidenciaId: string) => {
     try {
-      setLoadingMediaEvidenciaId(ev.id);
+      setLoadingMediaEvidenciaId(evidenciaId);
       if (activeMediaUrl) {
         URL.revokeObjectURL(activeMediaUrl);
         setActiveMediaUrl(null);
       }
-      const sessionData = (await supabase.auth.getSession()).data.session;
-      const token = sessionData?.access_token;
-      const res = await fetch(`${apiBaseUrl}/api/v1/evidencias/${ev.id}/reproducir`, {
+      setActiveReproduciendoEvidenciaId(null);
+      const res = await fetch(`${apiBaseUrl}/api/v1/evidencias/${evidenciaId}/reproducir`, {
         method: 'GET',
         headers: {
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          Authorization: `Bearer ${session?.access_token}`,
         },
       });
 
@@ -1572,12 +2348,44 @@ export default function App() {
       const blob = await res.blob();
       const objectUrl = URL.createObjectURL(blob);
       setActiveMediaUrl(objectUrl);
-      setActiveReproduciendoEvidenciaId(ev.id);
+      setActiveReproduciendoEvidenciaId(evidenciaId);
     } catch (err: any) {
       showToast('Error de Comunicación', `Error de comunicación con el servicio forense: ${err.message}`, 'error');
     } finally {
       setLoadingMediaEvidenciaId(null);
     }
+  };
+
+  // El registro de testigo no tiene incidente: se audita como una única evidencia
+  const handleAbrirAuditoriaTestigo = (testigo: RegistroTestigo) => {
+    handleCerrarReproductor();
+    setSelectedIncidente(null);
+    setIncidenteAuditadoConsentimiento({
+      consentimiento_exportacion: testigo.consentimiento_exportacion,
+      fecha_consentimiento: testigo.fecha_consentimiento,
+    });
+    setEvidenciasAudit([
+      {
+        id: testigo.id,
+        incidente_id: testigo.incidente_id || '',
+        usuario_id: '',
+        tipo_archivo: testigo.tipo_archivo,
+        hash_sha256: testigo.hash_sha256,
+        firma_hardware: '',
+        token_rfc3161: testigo.token_rfc3161,
+        prev_hash: testigo.prev_hash,
+        fecha_captura: testigo.fecha_captura,
+        origen_captura: 'testigo',
+        consentimiento_exportacion: testigo.consentimiento_exportacion,
+        fecha_consentimiento: testigo.fecha_consentimiento,
+        bloqueado_sin_consentimiento: !testigo.consentimiento_exportacion,
+      },
+    ]);
+    setEvidenciasPage(1);
+    setEvidenciasTotalPages(1);
+    setEvidenciasTotalRegistros(1);
+    setLoadingEvidencias(false);
+    setShowEvidenceAuditModal(true);
   };
 
   // Consultar evidencias forenses del incidente seleccionado con Paginación de 10 en 10
@@ -1637,6 +2445,7 @@ export default function App() {
           prev_hash: rawE.evi_prev_hash ?? rawE.prev_hash ?? null,
           fecha_captura: rawE.evi_fecha_captura ?? rawE.fecha_captura,
           metadata_dispositivo: rawE.evi_metadata_dispositivo ?? rawE.metadata_dispositivo,
+          origen_captura: rawE.evi_origen_captura ?? rawE.origen_captura,
           consentimiento_exportacion: rawE.evi_consentimiento_exportacion ?? rawE.consentimiento_exportacion,
           fecha_consentimiento: rawE.evi_fecha_consentimiento ?? rawE.fecha_consentimiento ?? null,
         };
@@ -1727,6 +2536,9 @@ export default function App() {
         .trim();
 
     return incidentes.filter((inc) => {
+      // El estado puede cambiar en tiempo real sin que se vuelva a consultar la lista
+      if (filtroEstado !== 'todos' && inc.estado !== filtroEstado) return false;
+
       const dirTotal = normalizar(`${inc.direccion || ''} ${inc.direccion_aprox || ''}`);
 
       // 1. Búsqueda libre: persona involucrada, calle, barrio o ciudad
@@ -1770,10 +2582,24 @@ export default function App() {
 
       return true;
     });
-  }, [incidentes, busquedaTexto, filtroFechaInicio, filtroFechaFin, filtroCiudad, filtroCalle, filtroNumero]);
+  }, [incidentes, filtroEstado, busquedaTexto, filtroFechaInicio, filtroFechaFin, filtroCiudad, filtroCalle, filtroNumero]);
 
   // Marcadores interactivos para MapViewComponent (sincronizados con los filtros activos)
   const mapMarkers: IncidentMarker[] = useMemo(() => {
+    if (verTestigos) {
+      return testigos
+        .filter((t) => t.latitud !== null && t.longitud !== null)
+        .map((t) => ({
+          id: t.id,
+          lat: t.latitud as number,
+          lng: t.longitud as number,
+          title: 'Registro de testigo',
+          estado: 'testigo',
+          origen: 'testigo',
+          victimaNombre: 'Registro de testigo',
+        }));
+    }
+
     return incidentesFiltrados
       .filter((inc) => inc.latitud && inc.longitud)
       .map((inc) => ({
@@ -1786,7 +2612,26 @@ export default function App() {
         origen: inc.origen,
         victimaNombre: inc.victima_nombre,
       }));
-  }, [incidentesFiltrados]);
+  }, [incidentesFiltrados, verTestigos, testigos]);
+
+  const puedeVerTestigos = !(session as any)?.roles || (session as any).roles.includes('Autoridad');
+  const paginaLista = verTestigos ? testigosPage : incidentesPage;
+  const totalPaginasLista = verTestigos ? testigosTotalPages : incidentesTotalPages;
+
+  const irAPaginaLista = (pagina: number) => {
+    if (verTestigos) {
+      cargarTestigos(pagina);
+      return;
+    }
+    setIncidentesPage(pagina);
+    cargarIncidentes(pagina);
+  };
+
+  const handleElegirPestanaEstado = (estado: 'en_curso' | 'cerrado' | 'todos') => {
+    setVerTestigos(false);
+    setTestigoSeleccionado(null);
+    setFiltroEstado(estado);
+  };
 
   const totalActivos = useMemo(
     () => incidentes.filter((i) => i.estado === 'en_curso').length,
@@ -2493,10 +3338,11 @@ export default function App() {
               <Search size={16} color={colors.text.secondary} style={{ marginRight: 8 }} />
               <TextInput
                 style={[styles.searchInput, { color: colors.text.primary }]}
-                placeholder="Buscar por persona, calle o ciudad..."
+                placeholder={verTestigos ? 'Los testigos se filtran por fecha' : 'Buscar por persona, calle o ciudad...'}
                 placeholderTextColor={colors.text.disabled}
-                value={busquedaTexto}
+                value={verTestigos ? '' : busquedaTexto}
                 onChangeText={setBusquedaTexto}
+                editable={!verTestigos}
               />
               {busquedaTexto.length > 0 && (
                 <TouchableOpacity onPress={() => setBusquedaTexto('')} style={{ marginRight: 6 }}>
@@ -2663,7 +3509,7 @@ export default function App() {
                 </View>
 
                 {/* 2. Filtro por Ubicación Desglosado (Ciudad, Calle y Número) */}
-                <View style={[styles.filterFieldRow, { marginTop: 10 }]}>
+                {!verTestigos && <View style={[styles.filterFieldRow, { marginTop: 10 }]}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 }}>
                     <MapPin size={14} color={colors.semantic.info} />
                     <Text style={[styles.filterFieldLabel, { color: colors.text.secondary }]}>Filtrar por Ubicación Desglosada</Text>
@@ -2726,7 +3572,7 @@ export default function App() {
                       )}
                     </View>
                   </View>
-                </View>
+                </View>}
 
                 {/* 3. Botón de limpiar filtros activos */}
                 {hayFiltrosAvanzadosActivos && (
@@ -2749,14 +3595,14 @@ export default function App() {
             <TouchableOpacity
               style={[
                 styles.filterTab,
-                filtroEstado === 'en_curso' && [styles.filterTabActive, { borderBottomColor: colors.semantic.danger }],
+                !verTestigos && filtroEstado === 'en_curso' && [styles.filterTabActive, { borderBottomColor: colors.semantic.danger }],
               ]}
-              onPress={() => setFiltroEstado('en_curso')}
+              onPress={() => handleElegirPestanaEstado('en_curso')}
             >
               <Text
                 style={[
                   styles.filterTabText,
-                  { color: filtroEstado === 'en_curso' ? colors.semantic.danger : colors.text.secondary },
+                  { color: !verTestigos && filtroEstado === 'en_curso' ? colors.semantic.danger : colors.text.secondary },
                 ]}
               >
                 Activos ({incidentes.filter((i) => i.estado === 'en_curso').length})
@@ -2766,14 +3612,14 @@ export default function App() {
             <TouchableOpacity
               style={[
                 styles.filterTab,
-                filtroEstado === 'cerrado' && [styles.filterTabActive, { borderBottomColor: colors.semantic.success }],
+                !verTestigos && filtroEstado === 'cerrado' && [styles.filterTabActive, { borderBottomColor: colors.semantic.success }],
               ]}
-              onPress={() => setFiltroEstado('cerrado')}
+              onPress={() => handleElegirPestanaEstado('cerrado')}
             >
               <Text
                 style={[
                   styles.filterTabText,
-                  { color: filtroEstado === 'cerrado' ? colors.semantic.success : colors.text.secondary },
+                  { color: !verTestigos && filtroEstado === 'cerrado' ? colors.semantic.success : colors.text.secondary },
                 ]}
               >
                 Cerrados
@@ -2783,23 +3629,38 @@ export default function App() {
             <TouchableOpacity
               style={[
                 styles.filterTab,
-                filtroEstado === 'todos' && [styles.filterTabActive, { borderBottomColor: colors.border.focus }],
+                !verTestigos && filtroEstado === 'todos' && [styles.filterTabActive, { borderBottomColor: colors.border.focus }],
               ]}
-              onPress={() => setFiltroEstado('todos')}
+              onPress={() => handleElegirPestanaEstado('todos')}
             >
               <Text
                 style={[
                   styles.filterTabText,
-                  { color: filtroEstado === 'todos' ? colors.border.focus : colors.text.secondary },
+                  { color: !verTestigos && filtroEstado === 'todos' ? colors.border.focus : colors.text.secondary },
                 ]}
               >
                 Todos ({incidentes.length})
               </Text>
             </TouchableOpacity>
+
+            {puedeVerTestigos && (
+              <TouchableOpacity
+                style={[styles.filterTab, verTestigos && [styles.filterTabActive, { borderBottomColor: '#3B82F6' }]]}
+                onPress={() => {
+                  setVerTestigos(true);
+                  setSelectedIncidente(null);
+                  cargarTestigos(testigosPage);
+                }}
+              >
+                <Text style={[styles.filterTabText, { color: verTestigos ? '#3B82F6' : colors.text.secondary }]}>
+                  Testigos ({testigosTotalRegistros})
+                </Text>
+              </TouchableOpacity>
+            )}
           </View>
 
-          {/* Listado de Incidentes */}
-          {loadingData ? (
+          {/* Listado de Incidentes o de Testigos */}
+          {verTestigos ? renderListaTestigos() : loadingData ? (
             <View style={styles.centerBox}>
               <ActivityIndicator size="large" color={colors.border.focus} />
               <Text style={[styles.loadingText, { color: colors.text.secondary }]}>
@@ -2887,17 +3748,23 @@ export default function App() {
                         </Text>
                       </View>
 
-                      <View
-                        style={[
-                          styles.originTag,
-                          {
-                            backgroundColor: colors.bg.overlay,
-                          },
-                        ]}
-                      >
-                        <Text style={[styles.originTagText, { color: colors.text.secondary }]}>
-                          {item.origen === 'manual' ? 'SOS Manual' : 'Detección Acústica'}
-                        </Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                        {/* "Soy testigo" no crea incidentes: todo incidente lo activa una víctima */}
+                        <View style={[styles.originTag, { backgroundColor: colors.bg.overlay }]}>
+                          <Text style={[styles.originTagText, { color: colors.text.secondary }]}>Víctima</Text>
+                        </View>
+                        <View
+                          style={[
+                            styles.originTag,
+                            {
+                              backgroundColor: colors.bg.overlay,
+                            },
+                          ]}
+                        >
+                          <Text style={[styles.originTagText, { color: colors.text.secondary }]}>
+                            {item.origen === 'manual' ? 'SOS Manual' : 'Detección Acústica'}
+                          </Text>
+                        </View>
                       </View>
                     </View>
                   </TouchableOpacity>
@@ -2909,37 +3776,29 @@ export default function App() {
           {/* Barra de Paginación de 10 en 10 */}
           <View style={[styles.paginationBar, { borderTopColor: colors.border.default, backgroundColor: colors.bg.surface }]}>
             <TouchableOpacity
-              style={[styles.pageBtn, incidentesPage <= 1 && { opacity: 0.3 }]}
-              disabled={incidentesPage <= 1}
-              onPress={() => {
-                const prev = incidentesPage - 1;
-                setIncidentesPage(prev);
-                cargarIncidentes(prev);
-              }}
+              style={[styles.pageBtn, paginaLista <= 1 && { opacity: 0.3 }]}
+              disabled={paginaLista <= 1}
+              onPress={() => irAPaginaLista(paginaLista - 1)}
             >
-              <ChevronLeft size={16} color={incidentesPage <= 1 ? colors.text.disabled : colors.semantic.info} />
-              <Text style={[styles.pageBtnText, { color: incidentesPage <= 1 ? colors.text.disabled : colors.semantic.info }]}>
+              <ChevronLeft size={16} color={paginaLista <= 1 ? colors.text.disabled : colors.semantic.info} />
+              <Text style={[styles.pageBtnText, { color: paginaLista <= 1 ? colors.text.disabled : colors.semantic.info }]}>
                 Anterior
               </Text>
             </TouchableOpacity>
 
             <Text style={[styles.pageIndicatorText, { color: colors.text.secondary }]}>
-              {incidentesPage} / {incidentesTotalPages} ({incidentesTotalRegistros})
+              {paginaLista} / {totalPaginasLista} ({verTestigos ? testigosTotalRegistros : incidentesTotalRegistros})
             </Text>
 
             <TouchableOpacity
-              style={[styles.pageBtn, incidentesPage >= incidentesTotalPages && { opacity: 0.3 }]}
-              disabled={incidentesPage >= incidentesTotalPages}
-              onPress={() => {
-                const next = incidentesPage + 1;
-                setIncidentesPage(next);
-                cargarIncidentes(next);
-              }}
+              style={[styles.pageBtn, paginaLista >= totalPaginasLista && { opacity: 0.3 }]}
+              disabled={paginaLista >= totalPaginasLista}
+              onPress={() => irAPaginaLista(paginaLista + 1)}
             >
-              <Text style={[styles.pageBtnText, { color: incidentesPage >= incidentesTotalPages ? colors.text.disabled : colors.semantic.info }]}>
+              <Text style={[styles.pageBtnText, { color: paginaLista >= totalPaginasLista ? colors.text.disabled : colors.semantic.info }]}>
                 Siguiente
               </Text>
-              <ChevronRight size={16} color={incidentesPage >= incidentesTotalPages ? colors.text.disabled : colors.semantic.info} />
+              <ChevronRight size={16} color={paginaLista >= totalPaginasLista ? colors.text.disabled : colors.semantic.info} />
             </TouchableOpacity>
           </View>
         </View>
@@ -2948,16 +3807,22 @@ export default function App() {
         <View style={styles.mapArea}>
           <MapViewComponent
             markers={mapMarkers}
-            selectedId={selectedIncidente?.id}
+            selectedId={verTestigos ? testigoSeleccionado?.id : selectedIncidente?.id}
             onSelectIncident={(id) => {
+              if (verTestigos) {
+                setTestigoSeleccionado(testigos.find((t) => t.id === id) || null);
+                return;
+              }
               const found = incidentes.find((i) => i.id === id);
               if (found) setSelectedIncidente(found);
             }}
             isDark={isDark}
           />
 
+          {renderDrawerTestigo()}
+
           {/* Tarjeta Flotante de Inspección de Incidente */}
-          {selectedIncidente && (
+          {selectedIncidente && !verTestigos && (
             <View
               style={[
                 styles.inspectionDrawer,
@@ -3054,6 +3919,15 @@ export default function App() {
                   <Text style={styles.actionBtnText}>Auditar Evidencias Forenses</Text>
                 </TouchableOpacity>
 
+                {/* Botón Correlación Espaciotemporal Haversine (RF-3.6 / CU-10) */}
+                <TouchableOpacity
+                  style={[styles.actionBtn, { backgroundColor: '#4F46E5' }]}
+                  onPress={() => handleAbrirCorrelacionHaversine(selectedIncidente)}
+                >
+                  <Radio size={15} color="#FFFFFF" style={{ marginRight: 6 }} />
+                  <Text style={styles.actionBtnText}>Correlación Espaciotemporal</Text>
+                </TouchableOpacity>
+
                 {selectedIncidente.estado === 'en_curso' ? (
                   <TouchableOpacity
                     style={[styles.actionBtn, { backgroundColor: colors.semantic.success }]}
@@ -3099,7 +3973,7 @@ export default function App() {
                     Cadena Inmutable de Custodia Pericial
                   </Text>
                   <Text style={[styles.auditSubtitle, { color: colors.text.secondary }]}>
-                    Sellado Forense Multicapa (Capa 1: StrongBox TEE • Capa 2: TSA RFC 3161 • Capa 3: Log Relacional)
+                    Sellado Forense Multicapa (Capa 1: Android Keystore • Capa 2: TSA RFC 3161 • Capa 3: Log Relacional)
                   </Text>
                 </View>
               </View>
@@ -3167,14 +4041,14 @@ export default function App() {
                           }}
                         >
                           {tieneConsentimiento
-                            ? `La víctima o testigo titular autorizó formalmente el acceso probatorio y la exportación judicial de este incidente${fechaStr ? ` el ${fechaStr}` : ''}. Reproducción y paquete de exportación habilitados.`
+                            ? `La víctima o testigo titular autorizó formalmente el acceso probatorio y la exportación judicial de este ${selectedIncidente ? 'incidente' : 'registro'}${fechaStr ? ` el ${fechaStr}` : ''}. Reproducción${selectedIncidente ? ' y paquete de exportación' : ''} habilitados.`
                             : 'Requiere consentimiento expreso de la víctima/testigo desde la App ApoyAR (Ley 25.326 e ISO/IEC 27037). Solo se exhiben los metadatos de integridad forense (SHA-256 y sellado RFC 3161) para certificar la inmutabilidad de la prueba sin invadir la privacidad.'}
                         </Text>
                       </View>
                     </View>
 
                     {/* Botón de Exportación del Documento de Prueba */}
-                    <TouchableOpacity
+                    {selectedIncidente && <TouchableOpacity
                       disabled={!tieneConsentimiento || exportingPackage}
                       onPress={() => selectedIncidente && handleExportarDocumentoPrueba(selectedIncidente)}
                       style={{
@@ -3202,7 +4076,7 @@ export default function App() {
                       >
                         {exportingPackage ? 'Generando Paquete...' : 'Exportar Documento de Prueba'}
                       </Text>
-                    </TouchableOpacity>
+                    </TouchableOpacity>}
                   </View>
                 </View>
               );
@@ -3233,8 +4107,7 @@ export default function App() {
                   const itemDesbloqueado = Boolean(
                     tieneConsentimientoIncidente &&
                     ev.consentimiento_exportacion !== false &&
-                    !ev.bloqueado_sin_consentimiento &&
-                    ev.url_almacenamiento
+                    !ev.bloqueado_sin_consentimiento
                   );
 
                   return (
@@ -3256,6 +4129,7 @@ export default function App() {
                           <Text style={[styles.evidenceTipo, { color: colors.text.primary }]}>
                             Segmento de {ev.tipo_archivo.toUpperCase()}
                           </Text>
+                          {renderEtiquetaParticipante(formatOrigenCaptura(ev.origen_captura))}
                         </View>
                         <Text style={[styles.evidenceTime, { color: colors.text.secondary }]}>
                           {new Date(ev.fecha_captura).toLocaleString('es-AR')}
@@ -3333,113 +4207,12 @@ export default function App() {
                               Prueba probatoria multimedia habilitada para visualización forense
                             </Text>
                           </View>
-                          {ev.url_almacenamiento && (
-                            <TouchableOpacity
-                              style={{
-                                flexDirection: 'row',
-                                alignItems: 'center',
-                                gap: 6,
-                                paddingHorizontal: 12,
-                                paddingVertical: 6,
-                                borderRadius: radii.sm,
-                                backgroundColor: activeReproduciendoEvidenciaId === ev.id ? colors.semantic.danger : colors.semantic.info,
-                              }}
-                              onPress={() => {
-                                if (activeReproduciendoEvidenciaId === ev.id) {
-                                  handleCerrarReproductor();
-                                } else {
-                                  handleReproducirEvidenciaForense(ev);
-                                }
-                              }}
-                            >
-                              {loadingMediaEvidenciaId === ev.id ? (
-                                <ActivityIndicator size="small" color="#ffffff" />
-                              ) : activeReproduciendoEvidenciaId === ev.id ? (
-                                <>
-                                  <X size={13} color="#ffffff" />
-                                  <Text style={{ color: '#ffffff', fontSize: 11, fontWeight: '700' }}>
-                                    Cerrar Reproductor
-                                  </Text>
-                                </>
-                              ) : (
-                                <>
-                                  <Play size={13} color="#ffffff" />
-                                  <Text style={{ color: '#ffffff', fontSize: 11, fontWeight: '700' }}>
-                                    {ev.tipo_archivo === 'video'
-                                      ? 'Ver Video Desencriptado'
-                                      : ev.tipo_archivo === 'imagen'
-                                      ? 'Ver Fotografía'
-                                      : 'Escuchar Audio'}
-                                  </Text>
-                                </>
-                              )}
-                            </TouchableOpacity>
-                          )}
+                          {renderBotonVerEvidencia(ev.id, ev.tipo_archivo)}
                         </View>
                       )}
 
                       {/* Reproductor Forense HTML5 Integrado */}
-                      {itemDesbloqueado && activeReproduciendoEvidenciaId === ev.id && activeMediaUrl && (
-                      <View
-                        style={{
-                          marginTop: 10,
-                          padding: 12,
-                          backgroundColor: '#000000',
-                          borderRadius: radii.md,
-                          borderWidth: 1,
-                          borderColor: colors.border.default,
-                        }}
-                      >
-                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                          <Text style={{ color: colors.semantic.success, fontSize: 11, fontWeight: '700' }}>
-                            ✓ Verificación Forense: Integridad SHA-256 Validada
-                          </Text>
-                          <TouchableOpacity
-                            onPress={handleCerrarReproductor}
-                            style={{ padding: 4 }}
-                          >
-                            <X size={16} color="#94A3B8" />
-                          </TouchableOpacity>
-                        </View>
-
-                        {ev.tipo_archivo === 'video' ? (
-                          <video
-                            src={activeMediaUrl}
-                            controls
-                            autoPlay
-                            style={{
-                              width: '100%',
-                              maxHeight: 380,
-                              borderRadius: 6,
-                              backgroundColor: '#000',
-                            }}
-                          />
-                        ) : ev.tipo_archivo === 'audio' ? (
-                          <audio
-                            src={activeMediaUrl}
-                            controls
-                            autoPlay
-                            style={{
-                              width: '100%',
-                              marginTop: 4,
-                            }}
-                          />
-                        ) : (
-                          <img
-                            src={activeMediaUrl}
-                            alt="Evidencia Forense Desencriptada"
-                            style={{
-                              maxWidth: '100%',
-                              maxHeight: 400,
-                              borderRadius: 6,
-                              objectFit: 'contain',
-                              display: 'block',
-                              margin: '0 auto',
-                            }}
-                          />
-                        )}
-                      </View>
-                    )}
+                      {itemDesbloqueado && activeReproduciendoEvidenciaId === ev.id && renderReproductorForense(ev.tipo_archivo)}
                   </View>
                 );
               })}
@@ -3577,6 +4350,46 @@ export default function App() {
               </TouchableOpacity>
             </View>
 
+            {/* Barra de Búsqueda y Filtrado (institución, cargo, DNI, nombre, apellido, email) */}
+            {(adminTab === 'activos' || adminTab === 'inactivos') && (
+              <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md, paddingBottom: spacing.xs, backgroundColor: colors.bg.surface, borderBottomWidth: 1, borderBottomColor: colors.border.default }}>
+                <View style={[styles.searchBox, { backgroundColor: colors.bg.base, borderColor: colors.border.default, margin: 0 }]}>
+                  <Search size={16} color={colors.text.secondary} style={{ marginRight: 8 }} />
+                  <TextInput
+                    style={[styles.searchInput, { color: colors.text.primary, height: 38 }]}
+                    placeholder="Buscar por institución, cargo, DNI, nombre, apellido, email..."
+                    placeholderTextColor={colors.text.disabled}
+                    value={operadoresSearchQuery}
+                    onChangeText={(txt) => setOperadoresSearchQuery(txt)}
+                    onSubmitEditing={() => cargarUsuariosAdmin(adminTab, 1, operadoresSearchQuery)}
+                  />
+                  {operadoresSearchQuery.length > 0 && (
+                    <TouchableOpacity
+                      onPress={() => {
+                        setOperadoresSearchQuery('');
+                        cargarUsuariosAdmin(adminTab, 1, '');
+                      }}
+                      style={{ padding: 4 }}
+                    >
+                      <X size={16} color={colors.text.secondary} />
+                    </TouchableOpacity>
+                  )}
+                </View>
+                {operadoresSearchQuery.trim().length > 0 && (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 6, paddingHorizontal: 4 }}>
+                    <Text style={{ fontSize: 11, color: colors.semantic.info }}>
+                      Filtrando por institución, cargo, DNI, nombre, apellido o email
+                    </Text>
+                    <TouchableOpacity onPress={() => cargarUsuariosAdmin(adminTab, 1, operadoresSearchQuery)}>
+                      <Text style={{ fontSize: 11, color: colors.semantic.info, fontWeight: '700' }}>
+                        Buscar en servidor ↵
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+              </View>
+            )}
+
             {/* Contenido de la Pestaña */}
             {adminTab === 'activos' ? (
               <ScrollView style={styles.adminModalBody}>
@@ -3595,6 +4408,24 @@ export default function App() {
                       .filter((usr) => {
                         const roles = usr.roles && usr.roles.length > 0 ? usr.roles : [usr.rol || 'Operador'];
                         return roles.some((r: string) => r === 'Autoridad' || r === 'Administrador');
+                      })
+                      .filter((usr) => {
+                        const q = operadoresSearchQuery.trim().toLowerCase();
+                        if (!q) return true;
+                        const inst = (usr.institucion || '').toLowerCase();
+                        const cargo = (usr.cargo || '').toLowerCase();
+                        const dni = (usr.dni || '').toLowerCase();
+                        const nom = (usr.nombre || '').toLowerCase();
+                        const ape = (usr.apellido || '').toLowerCase();
+                        const em = (usr.email || '').toLowerCase();
+                        return (
+                          inst.includes(q) ||
+                          cargo.includes(q) ||
+                          dni.includes(q) ||
+                          nom.includes(q) ||
+                          ape.includes(q) ||
+                          em.includes(q)
+                        );
                       })
                       .map((usr) => {
                       const userRoles: string[] = usr.roles && usr.roles.length > 0 ? usr.roles : [usr.rol || 'Operador'];
@@ -3782,6 +4613,24 @@ export default function App() {
                           {/* ── COLUMNA DERECHA: ACCIONES COMPACTAS ── */}
                           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0, alignSelf: 'flex-start' }}>
 
+                            {/* Editar Operador Institucional */}
+                            <TouchableOpacity
+                              style={[
+                                styles.userActionBtnClean,
+                                {
+                                  backgroundColor: isDark ? '#1C2E3D' : '#EFF6FF',
+                                  borderColor: colors.semantic.info,
+                                },
+                              ]}
+                              onPress={() => handleAbrirEditarOperador(usr)}
+                              accessibilityLabel="Editar Operador Institucional"
+                            >
+                              <Pencil size={13} color={colors.semantic.info} style={{ marginRight: 4 }} />
+                              <Text style={{ fontSize: 12, fontWeight: '600', color: colors.semantic.info }}>
+                                Editar
+                              </Text>
+                            </TouchableOpacity>
+
                             {/* Agregar rol Administrador si solo es Autoridad */}
                             {!hasAdmin && (
                               <TouchableOpacity
@@ -3898,6 +4747,24 @@ export default function App() {
                       .filter((usr) => {
                         const roles = usr.roles && usr.roles.length > 0 ? usr.roles : [usr.rol || 'Operador'];
                         return roles.some((r: string) => r === 'Autoridad' || r === 'Administrador');
+                      })
+                      .filter((usr) => {
+                        const q = operadoresSearchQuery.trim().toLowerCase();
+                        if (!q) return true;
+                        const inst = (usr.institucion || '').toLowerCase();
+                        const cargo = (usr.cargo || '').toLowerCase();
+                        const dni = (usr.dni || '').toLowerCase();
+                        const nom = (usr.nombre || '').toLowerCase();
+                        const ape = (usr.apellido || '').toLowerCase();
+                        const em = (usr.email || '').toLowerCase();
+                        return (
+                          inst.includes(q) ||
+                          cargo.includes(q) ||
+                          dni.includes(q) ||
+                          nom.includes(q) ||
+                          ape.includes(q) ||
+                          em.includes(q)
+                        );
                       })
                       .map((usr) => {
                       const userRoles: string[] = usr.roles && usr.roles.length > 0 ? usr.roles : [usr.rol || 'Operador'];
@@ -4053,6 +4920,23 @@ export default function App() {
                           {/* ── COLUMNA DERECHA: ACCIONES COMPACTAS ── */}
                           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0, alignSelf: 'flex-start' }}>
 
+                            {/* Editar Operador Institucional */}
+                            <TouchableOpacity
+                              style={[
+                                styles.userActionBtnClean,
+                                {
+                                  backgroundColor: isDark ? '#1C2E3D' : '#EFF6FF',
+                                  borderColor: colors.semantic.info,
+                                },
+                              ]}
+                              onPress={() => handleAbrirEditarOperador(usr)}
+                              accessibilityLabel="Editar Operador Institucional"
+                            >
+                              <Pencil size={13} color={colors.semantic.info} style={{ marginRight: 4 }} />
+                              <Text style={{ fontSize: 12, fontWeight: '600', color: colors.semantic.info }}>
+                                Editar
+                              </Text>
+                            </TouchableOpacity>
 
                             {/* Reactivar Operador */}
                             <TouchableOpacity
@@ -4711,6 +5595,25 @@ export default function App() {
                       </View>
                     </View>
 
+                    <View style={styles.formRow}>
+                      <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Dirección de Domicilio</Text>
+                      <TextInput
+                        style={[
+                          styles.modalInput,
+                          {
+                            backgroundColor: colors.bg.elevated,
+                            borderColor: colors.border.default,
+                            color: colors.text.primary,
+                          },
+                        ]}
+                        placeholder="ej: Av. 25 de Mayo 1234, Formosa"
+                        placeholderTextColor={colors.text.disabled}
+                        value={nuevoDireccion}
+                        onChangeText={setNuevoDireccion}
+                        maxLength={255}
+                      />
+                    </View>
+
                     <View style={{ flexDirection: 'row', gap: 12 }}>
                       <View style={[styles.formRow, { flex: 1 }]}>
                         <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Género</Text>
@@ -5079,6 +5982,752 @@ export default function App() {
           </View>
         </View>
       </Modal>
+
+      {/* ── MODAL: EDITAR OPERADOR INSTITUCIONAL ── */}
+      <Modal visible={showEditOperatorModal} transparent animationType="fade" onRequestClose={() => setShowEditOperatorModal(false)}>
+        <View style={styles.passwordModalOverlay}>
+          <View style={[styles.passwordModalBox, { backgroundColor: colors.bg.surface, borderColor: colors.border.default, maxWidth: 620, maxHeight: '92vh' as any }]}>
+            {/* Header del Modal */}
+            <View style={[styles.adminModalHeader, { borderBottomColor: colors.border.default }]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <View style={{ width: 36, height: 36, borderRadius: radii.full, backgroundColor: colors.semantic.infoBg, alignItems: 'center', justifyContent: 'center' }}>
+                  <Pencil size={18} color={colors.semantic.info} />
+                </View>
+                <View>
+                  <Text style={[styles.auditTitle, { color: colors.text.primary }]}>
+                    Editar Operador Institucional
+                  </Text>
+                  <Text style={[styles.auditSubtitle, { color: colors.text.secondary }]}>
+                    {targetEditOperator?.email} • {targetEditOperator?.nombre} {targetEditOperator?.apellido}
+                  </Text>
+                </View>
+              </View>
+              <TouchableOpacity onPress={() => setShowEditOperatorModal(false)} style={styles.closeBtn}>
+                <X size={20} color={colors.text.secondary} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Formulario Scrolleable */}
+            <ScrollView style={{ padding: spacing.lg }} contentContainerStyle={{ gap: spacing.md, paddingBottom: 16 }}>
+              {/* Sección 1: Datos Personales */}
+              <Text style={{ fontSize: 13, fontWeight: '700', color: colors.semantic.info, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                1. Datos Personales del Agente
+              </Text>
+
+              <View style={{ flexDirection: 'row', gap: 12 }}>
+                <View style={[styles.formRow, { flex: 1 }]}>
+                  <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Nombre *</Text>
+                  <TextInput
+                    style={[styles.modalInput, { backgroundColor: colors.bg.elevated, borderColor: colors.border.default, color: colors.text.primary }]}
+                    value={editNombre}
+                    onChangeText={setEditNombre}
+                    placeholder="Nombre"
+                    placeholderTextColor={colors.text.disabled}
+                  />
+                </View>
+                <View style={[styles.formRow, { flex: 1 }]}>
+                  <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Apellido *</Text>
+                  <TextInput
+                    style={[styles.modalInput, { backgroundColor: colors.bg.elevated, borderColor: colors.border.default, color: colors.text.primary }]}
+                    value={editApellido}
+                    onChangeText={setEditApellido}
+                    placeholder="Apellido"
+                    placeholderTextColor={colors.text.disabled}
+                  />
+                </View>
+              </View>
+
+              <View style={{ flexDirection: 'row', gap: 12 }}>
+                <View style={[styles.formRow, { flex: 1 }]}>
+                  <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>DNI *</Text>
+                  <TextInput
+                    style={[styles.modalInput, { backgroundColor: colors.bg.elevated, borderColor: colors.border.default, color: colors.text.primary }]}
+                    value={editDni}
+                    onChangeText={setEditDni}
+                    placeholder="ej: 34123456"
+                    placeholderTextColor={colors.text.disabled}
+                    keyboardType="numeric"
+                  />
+                </View>
+                <View style={[styles.formRow, { flex: 1 }]}>
+                  <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Teléfono</Text>
+                  <TextInput
+                    style={[styles.modalInput, { backgroundColor: colors.bg.elevated, borderColor: colors.border.default, color: colors.text.primary }]}
+                    value={editTelefono}
+                    onChangeText={setEditTelefono}
+                    placeholder="ej: +54 370 4123456"
+                    placeholderTextColor={colors.text.disabled}
+                  />
+                </View>
+              </View>
+
+              <View style={{ flexDirection: 'row', gap: 12 }}>
+                <View style={[styles.formRow, { flex: 1 }]}>
+                  <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Fecha Nacimiento (YYYY-MM-DD)</Text>
+                  <TextInput
+                    style={[styles.modalInput, { backgroundColor: colors.bg.elevated, borderColor: colors.border.default, color: colors.text.primary }]}
+                    value={editFechaNac}
+                    onChangeText={setEditFechaNac}
+                    placeholder="AAAA-MM-DD"
+                    placeholderTextColor={colors.text.disabled}
+                  />
+                </View>
+                <View style={[styles.formRow, { flex: 1 }]}>
+                  <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Género</Text>
+                  {Platform.OS === 'web' ? (
+                    <select
+                      value={editGenero}
+                      onChange={(e: any) => setEditGenero(e.target.value)}
+                      style={{
+                        height: 42,
+                        borderRadius: radii.sm,
+                        borderWidth: 1,
+                        borderStyle: 'solid',
+                        borderColor: colors.border.default,
+                        backgroundColor: colors.bg.elevated,
+                        color: colors.text.primary,
+                        paddingLeft: 12,
+                        paddingRight: 12,
+                        fontSize: 13,
+                        outline: 'none',
+                        marginTop: 4,
+                        fontFamily: 'inherit',
+                        width: '100%',
+                      }}
+                    >
+                      <option value="Femenino" style={{ backgroundColor: '#1E293B', color: '#F8FAFC' }}>Femenino</option>
+                      <option value="Masculino" style={{ backgroundColor: '#1E293B', color: '#F8FAFC' }}>Masculino</option>
+                      <option value="No binario" style={{ backgroundColor: '#1E293B', color: '#F8FAFC' }}>No binario</option>
+                    </select>
+                  ) : null}
+                </View>
+              </View>
+
+              <View style={styles.formRow}>
+                <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Dirección de Domicilio</Text>
+                <TextInput
+                  style={[styles.modalInput, { backgroundColor: colors.bg.elevated, borderColor: colors.border.default, color: colors.text.primary }]}
+                  value={editDireccion}
+                  onChangeText={setEditDireccion}
+                  placeholder="ej: Av. 25 de Mayo 1234, Formosa"
+                  placeholderTextColor={colors.text.disabled}
+                />
+              </View>
+
+              {/* Sección 2: Adscripción Institucional 3FN Formosa */}
+              <Text style={{ fontSize: 13, fontWeight: '700', color: colors.semantic.info, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 8 }}>
+                2. Adscripción Institucional
+              </Text>
+
+              <View style={styles.formRow}>
+                <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Institución de Pertenencia</Text>
+                {Platform.OS === 'web' ? (
+                  <select
+                    value={editInstitucionId ?? ''}
+                    onChange={(e: any) => {
+                      const val = e.target.value ? Number(e.target.value) : null;
+                      setEditInstitucionId(val);
+                      const primerDep = dependencias.find((d) => d.id_institucion === val);
+                      setEditDependenciaId(primerDep ? primerDep.id_dependencia : null);
+                      const primerSede = primerDep ? sedes.find((s) => s.id_dependencia === primerDep.id_dependencia) : null;
+                      setEditSedeId(primerSede ? primerSede.id_sede : null);
+                    }}
+                    style={{
+                      height: 42,
+                      borderRadius: radii.sm,
+                      borderWidth: 1,
+                      borderStyle: 'solid',
+                      borderColor: colors.border.default,
+                      backgroundColor: colors.bg.elevated,
+                      color: colors.text.primary,
+                      paddingLeft: 12,
+                      paddingRight: 12,
+                      fontSize: 13,
+                      outline: 'none',
+                      marginTop: 4,
+                      fontFamily: 'inherit',
+                      width: '100%',
+                    }}
+                  >
+                    {instituciones.map((inst) => (
+                      <option key={inst.id_institucion} value={inst.id_institucion} style={{ backgroundColor: '#1E293B', color: '#F8FAFC' }}>
+                        {inst.nombre} ({inst.tipo_organismo})
+                      </option>
+                    ))}
+                  </select>
+                ) : null}
+              </View>
+
+              <View style={{ flexDirection: 'row', gap: 12 }}>
+                <View style={[styles.formRow, { flex: 1 }]}>
+                  <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Dependencia / Unidad</Text>
+                  {Platform.OS === 'web' ? (
+                    <select
+                      value={editDependenciaId ?? ''}
+                      onChange={(e: any) => {
+                        const val = e.target.value ? Number(e.target.value) : null;
+                        setEditDependenciaId(val);
+                        const primerSede = sedes.find((s) => s.id_dependencia === val);
+                        setEditSedeId(primerSede ? primerSede.id_sede : null);
+                      }}
+                      style={{
+                        height: 42,
+                        borderRadius: radii.sm,
+                        borderWidth: 1,
+                        borderStyle: 'solid',
+                        borderColor: colors.border.default,
+                        backgroundColor: colors.bg.elevated,
+                        color: colors.text.primary,
+                        paddingLeft: 12,
+                        paddingRight: 12,
+                        fontSize: 13,
+                        outline: 'none',
+                        marginTop: 4,
+                        fontFamily: 'inherit',
+                        width: '100%',
+                      }}
+                    >
+                      {dependencias
+                        .filter((d) => !editInstitucionId || d.id_institucion === editInstitucionId)
+                        .map((dep) => (
+                          <option key={dep.id_dependencia} value={dep.id_dependencia} style={{ backgroundColor: '#1E293B', color: '#F8FAFC' }}>
+                            {dep.nombre} ({dep.tipo_unidad})
+                          </option>
+                        ))}
+                    </select>
+                  ) : null}
+                </View>
+
+                <View style={[styles.formRow, { flex: 1 }]}>
+                  <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Sede Operativa</Text>
+                  {Platform.OS === 'web' ? (
+                    <select
+                      value={editSedeId ?? ''}
+                      onChange={(e: any) => setEditSedeId(e.target.value ? Number(e.target.value) : null)}
+                      style={{
+                        height: 42,
+                        borderRadius: radii.sm,
+                        borderWidth: 1,
+                        borderStyle: 'solid',
+                        borderColor: colors.border.default,
+                        backgroundColor: colors.bg.elevated,
+                        color: colors.text.primary,
+                        paddingLeft: 12,
+                        paddingRight: 12,
+                        fontSize: 13,
+                        outline: 'none',
+                        marginTop: 4,
+                        fontFamily: 'inherit',
+                        width: '100%',
+                      }}
+                    >
+                      {sedes
+                        .filter((s) => !editDependenciaId || s.id_dependencia === editDependenciaId)
+                        .map((sede) => (
+                          <option key={sede.id_sede} value={sede.id_sede} style={{ backgroundColor: '#1E293B', color: '#F8FAFC' }}>
+                            {sede.nombre_sede} ({sede.direccion})
+                          </option>
+                        ))}
+                    </select>
+                  ) : null}
+                </View>
+              </View>
+
+              <View style={{ flexDirection: 'row', gap: 12 }}>
+                <View style={[styles.formRow, { flex: 1 }]}>
+                  <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Cargo</Text>
+                  {Platform.OS === 'web' ? (
+                    <select
+                      value={editCargoId ?? ''}
+                      onChange={(e: any) => setEditCargoId(e.target.value ? Number(e.target.value) : null)}
+                      style={{
+                        height: 42,
+                        borderRadius: radii.sm,
+                        borderWidth: 1,
+                        borderStyle: 'solid',
+                        borderColor: colors.border.default,
+                        backgroundColor: colors.bg.elevated,
+                        color: colors.text.primary,
+                        paddingLeft: 12,
+                        paddingRight: 12,
+                        fontSize: 13,
+                        outline: 'none',
+                        marginTop: 4,
+                        fontFamily: 'inherit',
+                        width: '100%',
+                      }}
+                    >
+                      {cargos.map((c) => (
+                        <option key={c.id_cargo} value={c.id_cargo} style={{ backgroundColor: '#1E293B', color: '#F8FAFC' }}>
+                          {c.nombre_cargo}
+                        </option>
+                      ))}
+                    </select>
+                  ) : null}
+                </View>
+
+                <View style={[styles.formRow, { flex: 1 }]}>
+                  <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Legajo / Matrícula</Text>
+                  <TextInput
+                    style={[styles.modalInput, { backgroundColor: colors.bg.elevated, borderColor: colors.border.default, color: colors.text.primary }]}
+                    value={editLegajo}
+                    onChangeText={setEditLegajo}
+                    placeholder="ej: LP-POL-10823"
+                    placeholderTextColor={colors.text.disabled}
+                  />
+                </View>
+              </View>
+
+              <View style={styles.formRow}>
+                <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Notas / Observaciones Periciales</Text>
+                <TextInput
+                  style={[styles.modalInput, { backgroundColor: colors.bg.elevated, borderColor: colors.border.default, color: colors.text.primary, height: 60, textAlignVertical: 'top' as any }]}
+                  value={editNotas}
+                  onChangeText={setEditNotas}
+                  placeholder="Observaciones de auditoría o asignación..."
+                  placeholderTextColor={colors.text.disabled}
+                  multiline
+                />
+              </View>
+
+              {/* Botones de Acción */}
+              <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 12, marginTop: 8 }}>
+                <TouchableOpacity
+                  style={[styles.secondaryModalBtn, { borderColor: colors.border.default }]}
+                  onPress={() => setShowEditOperatorModal(false)}
+                >
+                  <Text style={{ color: colors.text.primary, fontWeight: '600', fontSize: 13 }}>Cancelar</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[
+                    styles.primaryModalBtn,
+                    {
+                      backgroundColor: colors.semantic.info,
+                      opacity: guardandoOperador || !editNombre.trim() || !editApellido.trim() ? 0.6 : 1,
+                      cursor: guardandoOperador || !editNombre.trim() || !editApellido.trim() ? 'not-allowed' : 'pointer',
+                    } as any,
+                  ]}
+                  onPress={handleGuardarEditarOperador}
+                  disabled={guardandoOperador || !editNombre.trim() || !editApellido.trim()}
+                >
+                  {guardandoOperador ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <Text style={{ color: '#FFFFFF', fontWeight: '700', fontSize: 13 }}>Guardar Cambios</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── MODAL: CORRELACIÓN ESPACIOTEMPORAL DE UN INCIDENTE (HAVERSINE) ── */}
+      <Modal visible={showHaversineModal} transparent animationType="fade" onRequestClose={handleCerrarCorrelacion}>
+        <View style={styles.passwordModalOverlay}>
+          <View style={[styles.passwordModalBox, { backgroundColor: colors.bg.surface, borderColor: colors.border.default, maxWidth: 760, maxHeight: '92vh' as any }]}>
+            {/* Header del Modal */}
+            <View style={[styles.adminModalHeader, { borderBottomColor: colors.border.default }]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <View style={{ width: 36, height: 36, borderRadius: radii.full, backgroundColor: 'rgba(59, 130, 246, 0.15)', alignItems: 'center', justifyContent: 'center' }}>
+                  <Compass size={20} color="#3B82F6" />
+                </View>
+                <View>
+                  <Text style={[styles.auditTitle, { color: colors.text.primary }]}>
+                    Correlación Espaciotemporal (Haversine)
+                  </Text>
+                  <Text style={[styles.auditSubtitle, { color: colors.text.secondary }]}>
+                    Otros incidentes y evidencias cercanos en lugar y hora
+                  </Text>
+                </View>
+              </View>
+              <TouchableOpacity onPress={handleCerrarCorrelacion} style={styles.closeBtn}>
+                <X size={20} color={colors.text.secondary} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={{ padding: spacing.lg }} contentContainerStyle={{ gap: spacing.md, paddingBottom: 16 }}>
+              {/* Alcance de los resultados */}
+              <View style={[styles.alertSuccessBox, { backgroundColor: isDark ? '#0C1E33' : '#EFF6FF', borderColor: '#3B82F6' }]}>
+                <Info size={18} color="#3B82F6" style={{ marginRight: 8, marginTop: 2, flexShrink: 0 }} />
+                <View style={{ flex: 1 }}>
+                  <Text style={{ color: isDark ? '#BFDBFE' : '#1E40AF', fontSize: 12, lineHeight: 17 }}>
+                    <Text style={{ fontWeight: '700' }}>Cómo leer estos resultados:</Text> Una coincidencia solo indica cercanía en lugar y hora; no prueba que los hechos estén relacionados. La valoración corresponde a los profesionales que intervienen en cada caso, y el contenido de cada evidencia solo se puede consultar con el consentimiento de su titular.
+                  </Text>
+                </View>
+              </View>
+
+              {/* Incidente de referencia */}
+              <View style={[styles.institutionalBoxClean, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
+                <View style={[styles.institutionalIconContainer, { backgroundColor: isDark ? 'rgba(59, 130, 246, 0.15)' : '#EFF6FF' }]}>
+                  <MapPin size={18} color="#3B82F6" />
+                </View>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={{ fontSize: 13, fontWeight: '700', color: colors.text.primary }}>
+                    {haversineTestigoRef
+                      ? `Registro de testigo de referencia • ${formatTipoArchivo(haversineTestigoRef.tipo_archivo)}`
+                      : `Incidente de referencia: ${haversineIncidenteRef?.victima_nombre || 'Persona protegida'} • ${haversineIncidenteRef?.origen === 'manual' ? 'SOS Manual' : 'Detección Acústica'}`}
+                  </Text>
+                  <Text style={{ fontSize: 11, color: colors.text.secondary, marginTop: 2 }}>
+                    Coordenadas: {haversineLatitud.toFixed(5)}, {haversineLongitud.toFixed(5)} • {haversineTestigoRef ? 'Captura' : 'Inicio'}: {new Date(haversineFechaHora).toLocaleString('es-AR')}
+                  </Text>
+                </View>
+              </View>
+
+              {/* Evidencia del incidente o del testigo de referencia */}
+              <View style={{ backgroundColor: colors.bg.base, padding: spacing.sm, borderRadius: radii.md, borderWidth: 1, borderColor: colors.border.default, gap: 8 }}>
+                {haversineTestigoRef
+                  ? renderEvidenciaDeCorrelacion({
+                      id: haversineTestigoRef.id,
+                      tipo_archivo: haversineTestigoRef.tipo_archivo,
+                      fecha_captura: haversineTestigoRef.fecha_captura,
+                      origen_captura: 'testigo',
+                      bloqueado_sin_consentimiento: !haversineTestigoRef.consentimiento_exportacion,
+                    })
+                  : haversineIncidenteRef && (
+                      <>
+                        {renderAlternarEvidencias(haversineIncidenteRef.id, 'Evidencias de este incidente')}
+                        {renderEvidenciasDeIncidente(haversineIncidenteRef.id)}
+                      </>
+                    )}
+              </View>
+
+              {/* Controles de Configuración de Umbral */}
+              <View style={{ backgroundColor: colors.bg.base, padding: spacing.md, borderRadius: radii.md, borderWidth: 1, borderColor: colors.border.default, gap: 12 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+                  <View>
+                    <Text style={{ fontSize: 12, fontWeight: '700', color: colors.text.primary }}>
+                      Radio de búsqueda:
+                    </Text>
+                    <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                      Distancia máxima respecto del {haversineTestigoRef ? 'registro' : 'incidente'}
+                    </Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', gap: 6 }}>
+                    {[100, 250, 500, 1000, 2000].map((mts) => (
+                      <TouchableOpacity
+                        key={mts}
+                        style={[
+                          { paddingHorizontal: 10, paddingVertical: 5, borderRadius: radii.full, borderWidth: 1 },
+                          haversineRadioMetros === mts
+                            ? { backgroundColor: '#3B82F6', borderColor: '#2563EB' }
+                            : { backgroundColor: colors.bg.elevated, borderColor: colors.border.default },
+                        ]}
+                        onPress={() => {
+                          setHaversineRadioMetros(mts);
+                          ejecutarCorrelacionHaversine(haversineLatitud, haversineLongitud, haversineFechaHora, mts, haversineVentanaMinutos);
+                        }}
+                      >
+                        <Text style={{ fontSize: 11, fontWeight: '600', color: haversineRadioMetros === mts ? '#FFFFFF' : colors.text.secondary }}>
+                          {mts >= 1000 ? `${mts / 1000} km` : `${mts} m`}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+                  <View>
+                    <Text style={{ fontSize: 12, fontWeight: '700', color: colors.text.primary }}>
+                      Ventana de tiempo:
+                    </Text>
+                    <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                      Diferencia máxima de tiempo entre los hechos
+                    </Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', gap: 6 }}>
+                    {[15, 30, 60, 120].map((mins) => (
+                      <TouchableOpacity
+                        key={mins}
+                        style={[
+                          { paddingHorizontal: 10, paddingVertical: 5, borderRadius: radii.full, borderWidth: 1 },
+                          haversineVentanaMinutos === mins
+                            ? { backgroundColor: '#3B82F6', borderColor: '#2563EB' }
+                            : { backgroundColor: colors.bg.elevated, borderColor: colors.border.default },
+                        ]}
+                        onPress={() => {
+                          setHaversineVentanaMinutos(mins);
+                          ejecutarCorrelacionHaversine(haversineLatitud, haversineLongitud, haversineFechaHora, haversineRadioMetros, mins);
+                        }}
+                      >
+                        <Text style={{ fontSize: 11, fontWeight: '600', color: haversineVentanaMinutos === mins ? '#FFFFFF' : colors.text.secondary }}>
+                          ±{mins} min
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+              </View>
+
+              {/* Botón de Recálculo */}
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                <Text style={{ fontSize: 13, fontWeight: '700', color: colors.text.primary }}>
+                  Posibles coincidencias ({haversineGrupos.incidentes.length + haversineGrupos.testigosSinIncidente.length})
+                </Text>
+                <TouchableOpacity
+                  style={[styles.userActionBtnClean, { backgroundColor: colors.bg.elevated, borderColor: colors.border.default }]}
+                  onPress={() => ejecutarCorrelacionHaversine()}
+                  disabled={haversineLoading}
+                >
+                  <RefreshCw size={13} color={colors.text.primary} style={{ marginRight: 5 }} />
+                  <Text style={{ fontSize: 12, fontWeight: '600', color: colors.text.primary }}>
+                    Recalcular
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Coincidencias agrupadas por incidente */}
+              {haversineLoading ? (
+                <View style={{ padding: 32, alignItems: 'center', justifyContent: 'center' }}>
+                  <ActivityIndicator size="large" color="#3B82F6" />
+                  <Text style={{ marginTop: 12, color: colors.text.secondary, fontSize: 13 }}>
+                    Buscando coincidencias de lugar y hora...
+                  </Text>
+                </View>
+              ) : haversineResultados.length === 0 ? (
+                <View style={[styles.emptyUsersBox, { backgroundColor: colors.bg.base, borderColor: colors.border.default, borderWidth: 1 }]}>
+                  <Compass size={32} color={colors.text.disabled} style={{ marginBottom: 8 }} />
+                  <Text style={{ color: colors.text.primary, fontWeight: '600', fontSize: 13 }}>
+                    Sin coincidencias dentro del rango
+                  </Text>
+                  <Text style={{ color: colors.text.secondary, fontSize: 12, textAlign: 'center', marginTop: 4 }}>
+                    No se encontraron incidentes ni evidencias en un radio de {haversineRadioMetros} m y una ventana de ±{haversineVentanaMinutos} min.
+                  </Text>
+                </View>
+              ) : (
+                <View style={{ gap: 10 }}>
+                  {haversineGrupos.incidentes.map((grupo) => {
+                    return (
+                      <View
+                        key={grupo.incidente_id}
+                        style={[
+                          styles.userRowCard,
+                          {
+                            backgroundColor: colors.bg.elevated,
+                            borderColor: colors.border.default,
+                            flexDirection: 'column',
+                            alignItems: 'stretch',
+                            gap: 10,
+                          },
+                        ]}
+                      >
+                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                            {renderEtiquetaParticipante('Víctima')}
+                            <View style={[styles.userStatusTag, { backgroundColor: '#2A1F05', borderColor: '#F59E0B' }]}>
+                              <Text style={{ fontSize: 11, fontWeight: '700', color: '#FCD34D' }}>Posible coincidencia</Text>
+                            </View>
+                          </View>
+                          {renderMetricasCoincidencia(grupo)}
+                        </View>
+
+                        <View>
+                          <Text style={{ fontSize: 13, color: colors.text.primary, fontWeight: '700' }}>
+                            {grupo.victima_nombre || 'Persona protegida'}
+                          </Text>
+                          <Text style={{ fontSize: 11, color: colors.text.secondary, marginTop: 3 }}>
+                            {grupo.origen === 'manual' ? 'SOS Manual' : 'Detección Acústica'} • {new Date(grupo.fecha_hora).toLocaleString('es-AR')} • {formatEstado(grupo.estado)}
+                          </Text>
+                          <Text style={{ fontSize: 11, color: colors.text.secondary, marginTop: 2 }}>
+                            {grupo.direccion || `${Number(grupo.latitud).toFixed(5)}, ${Number(grupo.longitud).toFixed(5)}`}
+                          </Text>
+                          {!grupo.dentro_del_rango && (
+                            <Text style={{ fontSize: 11, color: colors.semantic.warning, marginTop: 2 }}>
+                              El incidente queda fuera del rango: la coincidencia viene de sus evidencias.
+                            </Text>
+                          )}
+                        </View>
+
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, borderTopWidth: 1, borderTopColor: colors.border.default, paddingTop: 8 }}>
+                          {renderAlternarEvidencias(grupo.incidente_id, 'Evidencias relacionadas')}
+
+                          <TouchableOpacity
+                            style={[
+                              styles.userActionBtnClean,
+                              {
+                                backgroundColor: isDark ? '#1C2E3D' : '#EFF6FF',
+                                borderColor: colors.semantic.info,
+                                paddingHorizontal: 12,
+                                paddingVertical: 6,
+                              },
+                            ]}
+                            onPress={() => handleIniciarVinculacionHaversine(grupo)}
+                          >
+                            <Link2 size={13} color={colors.semantic.info} style={{ marginRight: 5 }} />
+                            <Text style={{ fontSize: 12, fontWeight: '700', color: colors.semantic.info }}>
+                              {haversineTestigoRef ? 'Asociar a este incidente' : 'Relacionar incidentes'}
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+
+                        {renderEvidenciasDeIncidente(grupo.incidente_id, grupo.evidencias)}
+                      </View>
+                    );
+                  })}
+
+                  {haversineGrupos.testigosSinIncidente.length > 0 && (
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: colors.text.primary, marginTop: 6 }}>
+                      Registros de testigos sin incidente ({haversineGrupos.testigosSinIncidente.length})
+                    </Text>
+                  )}
+
+                  {haversineGrupos.testigosSinIncidente.map((ev) => (
+                    <View
+                      key={ev.evidencia_id}
+                      style={[
+                        styles.userRowCard,
+                        {
+                          backgroundColor: colors.bg.elevated,
+                          borderColor: colors.border.default,
+                          flexDirection: 'column',
+                          alignItems: 'stretch',
+                          gap: 10,
+                        },
+                      ]}
+                    >
+                      {renderEvidenciaDeCorrelacion(
+                        {
+                          id: ev.evidencia_id,
+                          tipo_archivo: ev.tipo_archivo,
+                          fecha_captura: ev.fecha_hora,
+                          origen_captura: ev.origen_captura,
+                          bloqueado_sin_consentimiento: !ev.consentimiento_exportacion,
+                        },
+                        ev
+                      )}
+                      {!haversineTestigoRef && <View style={{ flexDirection: 'row', justifyContent: 'flex-end', borderTopWidth: 1, borderTopColor: colors.border.default, paddingTop: 8 }}>
+                        <TouchableOpacity
+                          style={[
+                            styles.userActionBtnClean,
+                            {
+                              backgroundColor: isDark ? '#1C2E3D' : '#EFF6FF',
+                              borderColor: colors.semantic.info,
+                              paddingHorizontal: 12,
+                              paddingVertical: 6,
+                            },
+                          ]}
+                          onPress={() => handleIniciarVinculacionHaversine(ev)}
+                        >
+                          <Link2 size={13} color={colors.semantic.info} style={{ marginRight: 5 }} />
+                          <Text style={{ fontSize: 12, fontWeight: '700', color: colors.semantic.info }}>
+                            Asociar al incidente
+                          </Text>
+                        </TouchableOpacity>
+                      </View>}
+                    </View>
+                  ))}
+                </View>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── MODAL: MOTIVO DE LA RELACIÓN ── */}
+      <Modal visible={showJustificacionModal} transparent animationType="fade" onRequestClose={() => setShowJustificacionModal(false)}>
+        <View style={styles.passwordModalOverlay}>
+          <View style={[styles.passwordModalBox, { backgroundColor: colors.bg.surface, borderColor: colors.border.default, maxWidth: 540 }]}>
+            {/* Header del Modal */}
+            <View style={[styles.adminModalHeader, { borderBottomColor: colors.border.default }]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <View style={{ width: 36, height: 36, borderRadius: radii.full, backgroundColor: 'rgba(16, 185, 129, 0.15)', alignItems: 'center', justifyContent: 'center' }}>
+                  <Link2 size={20} color="#10B981" />
+                </View>
+                <View>
+                  <Text style={[styles.auditTitle, { color: colors.text.primary }]}>
+                    Motivo de la Relación
+                  </Text>
+                  <Text style={[styles.auditSubtitle, { color: colors.text.secondary }]}>
+                    Registra el criterio del operador; no acredita que los hechos estén relacionados
+                  </Text>
+                </View>
+              </View>
+              <TouchableOpacity onPress={() => setShowJustificacionModal(false)} style={styles.closeBtn}>
+                <X size={20} color={colors.text.secondary} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Contenido */}
+            <View style={{ padding: spacing.lg, gap: spacing.md }}>
+              <View style={[styles.institutionalBoxClean, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 12, fontWeight: '700', color: colors.text.primary }}>
+                    {justificacionTarget?.tipo === 'evidencia_comunitaria' ? 'Registro de testigo seleccionado' : 'Incidente seleccionado'}
+                  </Text>
+                  <Text style={{ fontSize: 11, color: colors.text.secondary, marginTop: 2 }}>
+                    Distancia: {Math.round(justificacionTarget?.distancia_metros ?? 0)} m • Diferencia de tiempo: {Math.round(justificacionTarget?.diferencia_minutos ?? 0)} min
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.formRow}>
+                <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>
+                  Motivo *
+                </Text>
+                <TextInput
+                  style={[
+                    styles.modalInput,
+                    {
+                      backgroundColor: colors.bg.elevated,
+                      borderColor: colors.border.default,
+                      color: colors.text.primary,
+                      height: 100,
+                      textAlignVertical: 'top' as any,
+                      paddingTop: 8,
+                    },
+                  ]}
+                  value={justificacionTexto}
+                  onChangeText={setJustificacionTexto}
+                  placeholder="Indique por qué los hechos podrían estar relacionados: cercanía, horario, vestimenta o lo observado..."
+                  placeholderTextColor={colors.text.disabled}
+                  multiline
+                />
+                <Text style={{ fontSize: 11, color: colors.text.secondary, marginTop: 4 }}>
+                  Mínimo 10 caracteres requeridos. Ingresados: {justificacionTexto.trim().length}
+                </Text>
+              </View>
+
+              <View style={[styles.alertSuccessBox, { backgroundColor: '#132A1C', borderColor: '#10B981' }]}>
+                <CheckCircle2 size={16} color="#10B981" style={{ marginRight: 8, flexShrink: 0 }} />
+                <Text style={{ color: '#A7F3D0', fontSize: 11, lineHeight: 16 }}>
+                  La relación quedará registrada con la identidad del operador. La valoración corresponde a los profesionales que intervienen en el caso.
+                </Text>
+              </View>
+
+              {/* Botones */}
+              <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 12, marginTop: 4 }}>
+                <TouchableOpacity
+                  style={[styles.secondaryModalBtn, { borderColor: colors.border.default }]}
+                  onPress={() => setShowJustificacionModal(false)}
+                >
+                  <Text style={{ color: colors.text.primary, fontWeight: '600', fontSize: 13 }}>Cancelar</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[
+                    styles.primaryModalBtn,
+                    {
+                      backgroundColor: '#10B981',
+                      opacity: asociandoEvidencia || justificacionTexto.trim().length < 10 ? 0.45 : 1,
+                      cursor: asociandoEvidencia || justificacionTexto.trim().length < 10 ? 'not-allowed' : 'pointer',
+                    } as any,
+                  ]}
+                  onPress={handleConfirmarVinculacionFormal}
+                  disabled={asociandoEvidencia || justificacionTexto.trim().length < 10}
+                >
+                  {asociandoEvidencia ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <Text style={{ color: '#FFFFFF', fontWeight: '700', fontSize: 13 }}>Confirmar</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
 
       {/* Modales y HUD de Notificaciones */}
       {renderConfirmModal()}

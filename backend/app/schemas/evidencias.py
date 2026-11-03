@@ -36,6 +36,14 @@ class SellarForenseRequest(BaseModel):
     )
 
 
+class SellarEvidenciaComunitariaRequest(SellarForenseRequest):
+    """
+    Evidencia aportada por un testigo sin incidente previo (RF-3.6): queda aislada
+    hasta que una Autoridad la asocie a un expediente.
+    """
+    incidente_id: Optional[UUID4] = Field(default=None, description="Debe omitirse: la evidencia no pertenece a un incidente.")
+
+
 class ActualizarConsentimientoRequest(BaseModel):
     consentimiento_exportacion: bool = Field(description="True para autorizar acceso y exportación judicial, False para revocarlo")
 

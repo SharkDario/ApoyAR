@@ -27,7 +27,7 @@ from app.repositories.evidencia_storage import EvidenciaStorage
 from app.repositories.incidente_repository import IncidenteRepository
 from app.repositories.usuario_repository import UsuarioRepository
 from app.services.access_control import AccessControlService
-from app.services.evidencia_cripto import descifrar_para_exportacion, extension_exportacion, obtener_sobre_digital
+from app.services.evidencia_cripto import descifrar_para_exportacion, es_audio_amr, extension_exportacion, obtener_sobre_digital
 from app.services.export_service import ExportService
 from app.services.pdf_generator import generar_informe_tecnico_pdf
 from app.services.roles import ROL_ADMINISTRADOR, ROL_AUTORIDAD, rol_actor_auditoria
@@ -259,8 +259,15 @@ class ExportacionForenseService:
             logger.warning("Aviso obteniendo adscripción de autoridad: %s", exc)
         return adscripcion
 
+    def _evidencias_con_consentimiento(self, incidente_id: str) -> List[Dict[str, Any]]:
+        """La evidencia de un testigo asociada al expediente exige el consentimiento de su autor."""
+        return [
+            ev for ev in self._evidencias.listar_por_incidente(incidente_id, "*", descendente=False)
+            if ev.get("inc_id_incidente") or ev.get("evi_consentimiento_exportacion")
+        ]
+
     def _evidencias_para_exportacion(self, incidente_id: str) -> List[Dict[str, Any]]:
-        evidencias = self._evidencias.listar_por_incidente(incidente_id, "*", descendente=False)
+        evidencias = self._evidencias_con_consentimiento(incidente_id)
         for ev in evidencias:
             ev["id"] = ev.get("evi_id_evidencia") or ev.get("id")
             ev["tipo_archivo"] = ev.get("evi_tipo_archivo") or ev.get("tipo_archivo")
@@ -300,7 +307,7 @@ class ExportacionForenseService:
                 if hash_esperado and hash_esperado != hash_calculado:
                     logger.warning("Discrepancia de SHA-256 en evidencia %s (esperado: %s, obtenido: %s)", ev.get("id"), hash_esperado, hash_calculado)
 
-                ext = extension_exportacion(tipo_archivo, formato)
+                ext = "3gp" if es_audio_amr(descifrado) else extension_exportacion(tipo_archivo, formato)
                 archivos[f"Segmento_{idx}_{tipo_label}_{str(ev.get('id'))[:8]}.{ext}"] = descifrado
             except Exception as dec_err:
                 logger.warning("Aviso procesando evidencia %s para exportación: %s", ev.get("id"), dec_err)
@@ -343,7 +350,7 @@ class ExportacionForenseService:
         except Exception:
             pass
 
-        evidencias = [self._alias_evidencia_informe(ev) for ev in self._evidencias.listar_por_incidente(incidente_id, "*", descendente=False)]
+        evidencias = [self._alias_evidencia_informe(ev) for ev in self._evidencias_con_consentimiento(incidente_id)]
         fecha_consentimiento = incidente.get("inc_fecha_consentimiento") or incidente.get("fecha_consentimiento")
         contexto = {
             "incidente_id": incidente_id,

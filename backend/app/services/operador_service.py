@@ -16,7 +16,7 @@ from app.repositories.auth_gateway import SupabaseAuthGateway
 from app.repositories.cargo_institucional_repository import CargoInstitucionalRepository
 from app.repositories.perfil_repository import PerfilRepository
 from app.repositories.usuario_repository import UsuarioRepository
-from app.schemas.admin import AgregarRolRequest, CrearOperadorRequest
+from app.schemas.admin import ActualizarOperadorRequest, AgregarRolRequest, CrearOperadorRequest
 from app.services.catalogo_service import nombre_cargo_estandar, resolver_id_cargo
 from app.services.password_policy import hash_institutional_password
 from app.services.roles import ROL_AUTORIDAD, ROL_VICTIMA, ROLES_INSTITUCIONALES, normalizar_rol
@@ -146,8 +146,8 @@ class OperadorService:
 
     # ── Listado de operadores ────────────────────────────────────────────────
 
-    def listar_operadores(self, page: int, limit: int, estado: Optional[str]) -> Dict[str, Any]:
-        """Operadores con al menos un rol institucional, agrupados por usuario y paginados."""
+    def listar_operadores(self, page: int, limit: int, estado: Optional[str], search: Optional[str] = None) -> Dict[str, Any]:
+        """Operadores con al menos un rol institucional, agrupados por usuario y paginados con filtro opcional de búsqueda."""
         try:
             asignaciones = self._perfiles.listar_todas_las_asignaciones()
 
@@ -198,6 +198,20 @@ class OperadorService:
                 todos = [op for op in todos if op["estado_aprobacion"] == "activo"]
             elif estado in ("inactivo", "inactivos", "suspendido", "suspendidos"):
                 todos = [op for op in todos if op["estado_aprobacion"] != "activo"]
+
+            if search and search.strip():
+                s = search.strip().lower()
+                todos = [
+                    op for op in todos
+                    if (
+                        s in (op.get("institucion") or "").lower()
+                        or s in (op.get("cargo") or "").lower()
+                        or s in (op.get("dni") or "").lower()
+                        or s in (op.get("nombre") or "").lower()
+                        or s in (op.get("apellido") or "").lower()
+                        or s in (op.get("email") or "").lower()
+                    )
+                ]
 
             todos.sort(key=lambda x: str(x.get("aprobado_en") or ""), reverse=True)
 
@@ -556,3 +570,86 @@ class OperadorService:
         except Exception:
             pass
         return {"status": "ok", "usuario_id": user_uuid, "nuevo_estado": estado}
+
+    def actualizar_operador(self, usuario_id: str, solicitud: ActualizarOperadorRequest, admin: Dict[str, Any]) -> Dict[str, Any]:
+        """Actualiza datos personales, adscripción institucional y notas del operador institucional."""
+        user_uuid = _uuid_valido(usuario_id)
+
+        # 1. Actualizar datos personales en persona
+        persona_id = self._usuarios.obtener_id_persona(user_uuid)
+        campos_persona: Dict[str, Any] = {}
+        if solicitud.nombre is not None and solicitud.nombre.strip():
+            campos_persona["per_nombre"] = solicitud.nombre.strip()
+        if solicitud.apellido is not None and solicitud.apellido.strip():
+            campos_persona["per_apellido"] = solicitud.apellido.strip()
+        if solicitud.dni is not None and solicitud.dni.strip():
+            campos_persona["per_dni"] = solicitud.dni.strip()
+        if solicitud.telefono is not None:
+            campos_persona["per_telefono"] = solicitud.telefono.strip()
+        if solicitud.direccion is not None:
+            campos_persona["per_direccion"] = solicitud.direccion.strip()
+        if solicitud.genero is not None:
+            campos_persona["per_genero"] = solicitud.genero.strip()
+        if solicitud.fecha_nacimiento is not None:
+            campos_persona["per_fecha_nacimiento"] = solicitud.fecha_nacimiento.strip()
+
+        if campos_persona:
+            if persona_id:
+                try:
+                    self._usuarios.actualizar_persona(persona_id, campos_persona)
+                except Exception as exc:
+                    logger.error("Error actualizando persona %s: %s", persona_id, exc)
+                    raise ErrorInternoError(f"No se pudieron actualizar los datos personales: {exc}")
+            else:
+                try:
+                    nueva_p = self._usuarios.insertar_persona({
+                        **campos_persona,
+                        "usu_id_usuario": user_uuid,
+                    })
+                    if nueva_p and (nueva_p.get("per_id_persona") or nueva_p.get("id")):
+                        pid = nueva_p.get("per_id_persona") or nueva_p.get("id")
+                        self._usuarios.vincular_persona(user_uuid, pid)
+                except Exception as exc:
+                    logger.warning("Aviso insertando datos de persona para operador %s: %s", user_uuid, exc)
+
+        # 2. Actualizar o asociar cargo institucional
+        legajo = solicitud.legajo_o_matricula
+        cargo_id = solicitud.id_cargo
+        sede_id = solicitud.id_sede
+
+        if cargo_id is not None or sede_id is not None or legajo is not None or solicitud.nombre_cargo:
+            now_iso = _ahora_iso()
+            datos_cargo: Dict[str, Any] = {
+                "usu_id_usuario": user_uuid,
+                "carins_activo": True,
+                "carins_asignado_en": now_iso,
+            }
+            if cargo_id is not None:
+                datos_cargo["car_id_cargo"] = cargo_id
+            if sede_id is not None:
+                datos_cargo["sed_id_sede"] = sede_id
+            if legajo is not None:
+                datos_cargo["carins_legajo_o_matricula"] = legajo.strip()
+            if solicitud.nombre_cargo:
+                datos_cargo["car_nombre_cargo"] = solicitud.nombre_cargo.strip()
+
+            try:
+                self._cargos.upsert(datos_cargo)
+            except Exception as exc:
+                logger.warning("Aviso actualizando cargo institucional de %s: %s", user_uuid, exc)
+
+        # 3. Actualizar notas en usuario_tiene_perfil
+        if solicitud.notas is not None:
+            try:
+                self._perfiles.actualizar_asignaciones_de_usuario(user_uuid, {
+                    "usuprf_notas": solicitud.notas.strip(),
+                })
+            except Exception as exc:
+                logger.warning("Aviso actualizando notas de perfil para %s: %s", user_uuid, exc)
+
+        logger.info("Operador institucional %s actualizado por administrador %s", user_uuid, admin.get("email"))
+        return {
+            "status": "ok",
+            "message": "Operador institucional actualizado exitosamente.",
+            "usuario_id": user_uuid,
+        }

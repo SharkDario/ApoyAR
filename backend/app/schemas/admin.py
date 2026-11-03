@@ -80,6 +80,23 @@ class CrearOperadorRequest(BaseModel):
     legajo_personal: Optional[str] = Field(default=None)
 
 
+class ActualizarOperadorRequest(BaseModel):
+    nombre: Optional[str] = Field(default=None, description="Nombre de pila según DNI")
+    apellido: Optional[str] = Field(default=None, description="Apellido según DNI")
+    dni: Optional[str] = Field(default=None, description="DNI único")
+    genero: Optional[str] = Field(default=None, description="Género")
+    fecha_nacimiento: Optional[str] = Field(default=None, description="Fecha de nacimiento en formato YYYY-MM-DD")
+    telefono: Optional[str] = Field(default=None, description="Teléfono de contacto institucional")
+    direccion: Optional[str] = Field(default=None, description="Dirección")
+    notas: Optional[str] = Field(default=None, description="Notas operativas de habilitación")
+    id_institucion: Optional[int] = Field(default=None, description="ID de Institución")
+    id_dependencia: Optional[int] = Field(default=None, description="ID de Dependencia")
+    id_sede: Optional[int] = Field(default=None, description="ID de Sede")
+    id_cargo: Optional[int] = Field(default=None, description="ID de Cargo")
+    nombre_cargo: Optional[str] = Field(default=None, description="Nombre del Cargo")
+    legajo_o_matricula: Optional[str] = Field(default=None, description="Legajo o matrícula institucional")
+
+
 class CambiarCargoActivoRequest(BaseModel):
     activo: bool = Field(description="Estado operativo del cargo institucional (True o False)")
 
@@ -90,9 +107,16 @@ class SugerenciasQuery(BaseModel):
     fecha_hora: datetime
     radio_metros: float = 500.0
     ventana_minutos: int = 30
+    incidente_id: Optional[str] = Field(default=None, description="ID opcional del incidente de referencia")
 
 
 class AsociarEvidenciaRequest(BaseModel):
     evidencia_id: str
     incidente_id: str
     justificacion_operativa: str
+
+
+class CorrelacionarIncidentesRequest(BaseModel):
+    incidente_origen_id: str = Field(..., description="ID del incidente base o expediente")
+    incidente_destino_id: str = Field(..., description="ID del incidente o evento correlacionado")
+    justificacion_operativa: str = Field(..., min_length=10, description="Motivación pericial y operativa fundada")
