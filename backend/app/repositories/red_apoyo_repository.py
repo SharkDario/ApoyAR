@@ -13,14 +13,22 @@ class RedApoyoRepository(SupabaseRepository):
     tabla = "red_apoyo"
 
     def listar_contactos_activos(self, victima_id: str) -> List[Dict[str, Any]]:
-        res = (
-            self._query()
-            .select("usu_id_contacto")
-            .eq("usu_id_victima", victima_id)
-            .eq("redapo_estado", "activo")
-            .execute()
-        )
-        return self._filas(res)
+        def consultar(columnas: str):
+            return (
+                self._query()
+                .select(columnas)
+                .eq("usu_id_victima", victima_id)
+                .eq("redapo_estado", "activo")
+                .execute()
+            )
+
+        try:
+            res = consultar("usu_id_contacto, redapo_avisos_pausados")
+        except Exception:
+            # Base sin la migración 022: todavía no existe la pausa de avisos
+            res = consultar("usu_id_contacto")
+        # Los contactos con avisos en pausa siguen vinculados, pero no reciben alertas (CU-02, 4a)
+        return [f for f in self._filas(res) if not f.get("redapo_avisos_pausados")]
 
     def existe_vinculo_activo(self, victima_id: str, contacto_id: str) -> bool:
         res = (

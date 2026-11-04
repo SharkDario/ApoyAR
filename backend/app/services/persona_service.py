@@ -12,7 +12,7 @@ from app.errors import AccesoDenegadoError, RecursoNoEncontradoError
 from app.repositories.auth_gateway import SupabaseAuthGateway
 from app.repositories.usuario_repository import UsuarioRepository
 from app.schemas.incidentes import ActualizarPersonaRequest
-from app.services.roles import ROL_ADMINISTRADOR, ROL_AUTORIDAD, roles_de
+from app.services.roles import es_operador_institucional
 
 # Sin O/0 ni I/1 para evitar ambigüedades al dictarlo
 ALFABETO_CODIGO_VINCULACION = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -27,7 +27,7 @@ class PersonaService:
     def obtener_perfil(self, usuario_id: str, solicitante: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """El usuario solo consulta sus propios datos, salvo Autoridad/Administrador o acceso interno con API Secret."""
         if solicitante is not None:
-            if usuario_id != solicitante["id"] and not ({ROL_AUTORIDAD, ROL_ADMINISTRADOR} & roles_de(solicitante)):
+            if usuario_id != solicitante["id"] and not es_operador_institucional(solicitante):
                 raise AccesoDenegadoError("Acceso denegado (Anti-IDOR): No puede consultar datos personales de otro usuario.")
 
         persona = self._usuarios.obtener_persona(usuario_id)

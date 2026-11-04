@@ -30,7 +30,7 @@ from app.services.access_control import AccessControlService
 from app.services.evidencia_cripto import descifrar_para_exportacion, es_audio_amr, extension_exportacion, obtener_sobre_digital
 from app.services.export_service import ExportService
 from app.services.pdf_generator import generar_informe_tecnico_pdf
-from app.services.roles import ROL_ADMINISTRADOR, ROL_AUTORIDAD, rol_actor_auditoria
+from app.services.roles import P_EVIDENCIA_EXPORTAR, rol_actor_auditoria, tiene_permiso
 
 logger = logging.getLogger("apoyar.exportacion")
 
@@ -98,9 +98,7 @@ class ExportacionForenseService:
         roles = usuario.get("roles", [])
         user_id = str(usuario["id"])
 
-        es_autoridad = (ROL_AUTORIDAD in roles) or self._acceso.tiene_cargo_activo(user_id)
-        if (ROL_ADMINISTRADOR in roles) and not es_autoridad:
-            raise AccesoDenegadoError("Acceso denegado: El perfil Administrador (IT) puro tiene vedada la exportación de material probatorio y multimedia de las víctimas.")
+        es_autoridad = tiene_permiso(usuario, P_EVIDENCIA_EXPORTAR)
 
         incidente = self._incidentes.obtener_por_id(incidente_id, COLUMNAS_INCIDENTE_EXPORTACION)
         if not incidente:
@@ -331,8 +329,8 @@ class ExportacionForenseService:
 
         es_victima = str(incidente.get("usu_id_victima")) == user_id
         if not es_victima:
-            if not (ROL_AUTORIDAD in roles or self._acceso.tiene_cargo_activo(user_id)):
-                raise AccesoDenegadoError("Acceso denegado: Se requiere rol de Autoridad.")
+            if not tiene_permiso(usuario, P_EVIDENCIA_EXPORTAR):
+                raise AccesoDenegadoError("Acceso denegado: Su perfil no tiene permiso para exportar evidencia.")
             if not bool(incidente.get("inc_consentimiento_exportacion")):
                 raise AccesoDenegadoError("Acceso denegado: Se requiere consentimiento informado de la víctima (Ley 25.326).")
 
@@ -403,9 +401,6 @@ class ExportacionForenseService:
         roles = usuario.get("roles", [])
         user_id = usuario["id"]
 
-        if ROL_ADMINISTRADOR in roles and ROL_AUTORIDAD not in roles:
-            raise AccesoDenegadoError("Acceso denegado: El perfil Administrador (IT) tiene vedada la exportación de material probatorio y multimedia de las víctimas.")
-
         raw = self._evidencias.obtener_por_id(evidencia_id)
         if not raw:
             raise RecursoNoEncontradoError("Evidencia no encontrada.")
@@ -438,8 +433,8 @@ class ExportacionForenseService:
                 raise AccesoDenegadoError("Acceso denegado: La víctima o testigo titular no ha otorgado consentimiento informado para exportar esta evidencia (Ley 25.326 / ISO 27037).")
             # Anti-IDOR: un tercero solo exporta material ajeno si es Autoridad (rol o
             # cargo institucional; la vigencia del cargo se valida a continuación)
-            if ROL_AUTORIDAD not in roles and not self._tiene_cargo_registrado(user_id):
-                raise AccesoDenegadoError("Acceso denegado: No posee permisos de Autoridad judicial o policial ni es la persona titular.")
+            if not tiene_permiso(usuario, P_EVIDENCIA_EXPORTAR):
+                raise AccesoDenegadoError("Acceso denegado: Su perfil no tiene permiso para exportar evidencia ni es la persona titular.")
 
         cargo, sede, legajo = "Personal Policial / Judicial Autorizado", "Dependencia Jurisdiccional", "N/D"
         try:
@@ -492,9 +487,3 @@ class ExportacionForenseService:
             nombre_archivo=f"apoyar_evidencia_{evidencia_id[:8]}_export.zip",
             hash_manifiesto=hash_manifiesto,
         )
-
-    def _tiene_cargo_registrado(self, usuario_id: str) -> bool:
-        try:
-            return self._cargos.obtener_estado(usuario_id) is not None
-        except Exception:
-            return False

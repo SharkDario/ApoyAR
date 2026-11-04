@@ -36,7 +36,7 @@ from app.services.evidencia_cripto import (
     tiene_dek,
     tipo_medio_reproduccion,
 )
-from app.services.roles import ROL_ADMINISTRADOR, ROL_AUTORIDAD
+from app.services.roles import P_EVIDENCIA_AUDITAR, es_operador_institucional, tiene_permiso
 from app.services.tsa_client import TSAClient
 
 logger = logging.getLogger("apoyar.evidencias")
@@ -84,7 +84,7 @@ class EvidenciaService:
         3. Solicita el TimeStampToken RFC 3161 a la TSA externa.
         4. Inserta el registro: firma hardware + token RFC 3161 + prev_hash.
         """
-        es_operador = bool(usuario and any(r in usuario.get("roles", []) for r in (ROL_AUTORIDAD, ROL_ADMINISTRADOR)))
+        es_operador = bool(usuario and es_operador_institucional(usuario))
         if usuario and str(solicitud.usuario_id) != usuario["id"] and not es_operador:
             raise AccesoDenegadoError("Acceso denegado (Anti-IDOR): No puede sellar evidencias en nombre de otro usuario.")
 
@@ -379,8 +379,8 @@ class EvidenciaService:
         offset = max(0, (page - 1) * limit)
 
         if incidente_id == LISTADO_TESTIGOS:
-            if ROL_AUTORIDAD not in roles:
-                raise AccesoDenegadoError("Acceso denegado: Solo la Autoridad puede consultar los registros de testigos.")
+            if not tiene_permiso(usuario, P_EVIDENCIA_AUDITAR):
+                raise AccesoDenegadoError("Acceso denegado: Su perfil no tiene permiso para consultar los registros de testigos.")
 
             instante = lambda valor: datetime.fromisoformat(valor.replace("Z", "+00:00"))
             registros = []
@@ -435,7 +435,10 @@ class EvidenciaService:
 
         incidente = self._acceso.verificar_acceso_incidente(incidente_id, usuario, accion="read")
 
-        es_admin_ti = ROL_ADMINISTRADOR in roles and ROL_AUTORIDAD not in roles
+        victima_id = str(incidente.get("usu_id_victima") or incidente.get("victima_id"))
+        es_victima = victima_id == usuario["id"]
+        if not es_victima and not tiene_permiso(usuario, P_EVIDENCIA_AUDITAR):
+            raise AccesoDenegadoError("Acceso denegado: Su perfil no tiene permiso para auditar las evidencias del incidente.")
         consentimiento_incidente = bool(incidente.get("inc_consentimiento_exportacion", incidente.get("consentimiento_exportacion", False)))
 
         filtradas = []
@@ -456,10 +459,14 @@ class EvidenciaService:
             ev_consent = item.get("evi_consentimiento_exportacion") if "evi_consentimiento_exportacion" in item else item.get("consentimiento_exportacion", True)
             item["fecha_consentimiento"] = item.get("evi_fecha_consentimiento") or item.get("fecha_consentimiento")
 
-            # Revocar el consentimiento del incidente revoca todo acceso probatorio
-            consentimiento_valido = bool(consentimiento_incidente and ev_consent)
+            # Prueba de la víctima: revocar el consentimiento del incidente revoca todo
+            # acceso. Prueba de un testigo: vale el consentimiento que dio el testigo.
+            if str(item.get("usu_id_usuario")) != victima_id:
+                consentimiento_valido = bool(ev_consent)
+            else:
+                consentimiento_valido = bool(consentimiento_incidente and ev_consent)
             item["consentimiento_exportacion"] = consentimiento_valido
-            if es_admin_ti or not consentimiento_valido:
+            if not es_victima and not consentimiento_valido:
                 item["url_almacenamiento"] = None
                 item["bloqueado_sin_consentimiento"] = True
             else:

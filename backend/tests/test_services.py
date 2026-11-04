@@ -30,6 +30,7 @@ CONTACTO = "33333333-3333-4333-8333-333333333333"
 AUTORIDAD = "44444444-4444-4444-8444-444444444444"
 INCIDENTE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 EVIDENCIA = "e1e1e1e1-e1e1-4e1e-8e1e-e1e1e1e1e1e1"
+TESTIGO_EVI = "e2e2e2e2-e2e2-4e2e-8e2e-e2e2e2e2e2e2"
 
 
 def base_de_datos(consentimiento=False, estado="en_curso"):
@@ -91,6 +92,32 @@ class AccessControlServiceTest(unittest.TestCase):
         with self.assertRaises(AccesoDenegadoError):
             self.acceso.verificar_acceso_evidencia(EVIDENCIA, autoridad, "play")
 
+    def test_administrador_ve_ubicacion_en_emergencia_pero_no_audita(self):
+        admin = {"id": OTRA, "roles": ["Administrador"]}
+        self.acceso.verificar_acceso_incidente(INCIDENTE, admin, "live_gps")
+        with self.assertRaises(AccesoDenegadoError):
+            self.acceso.verificar_acceso_evidencia(EVIDENCIA, admin, "audit")
+
+    def test_perfil_personalizado_usa_los_permisos_de_la_base(self):
+        monitor = {"id": OTRA, "roles": ["Monitoreo"], "permisos": ["incidente.monitorear"]}
+        self.acceso.verificar_acceso_incidente(INCIDENTE, monitor)
+        with self.assertRaises(AccesoDenegadoError):
+            self.acceso.verificar_acceso_incidente(INCIDENTE, monitor, "update_estado")
+        with self.assertRaises(AccesoDenegadoError):
+            self.acceso.verificar_acceso_evidencia(EVIDENCIA, monitor, "audit")
+
+    def test_prueba_de_testigo_vale_su_propio_consentimiento(self):
+        db = base_de_datos(consentimiento=False)
+        db.tables["evidencia"].append({
+            "evi_id_evidencia": TESTIGO_EVI, "inc_id_incidente": INCIDENTE, "usu_id_usuario": OTRA,
+            "evi_consentimiento_exportacion": True, "evi_hash_sha256": "b" * 64,
+        })
+        acceso = control_de_acceso(FakeClient(db))
+        autoridad = {"id": AUTORIDAD, "roles": ["Autoridad"]}
+        acceso.verificar_acceso_evidencia(TESTIGO_EVI, autoridad, "play")
+        with self.assertRaises(AccesoDenegadoError):
+            acceso.verificar_acceso_evidencia(EVIDENCIA, autoridad, "play")
+
     def test_uuid_invalido_y_recurso_inexistente(self):
         with self.assertRaises(SolicitudInvalidaError):
             self.acceso.verificar_acceso_incidente("no-es-uuid", {"id": VICTIMA, "roles": []})
@@ -135,6 +162,16 @@ class AlertaServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([a["usu_id_contacto"] for a in db.tables["alerta_temprana"]], [CONTACTO])
         notificador.desencadenar_alertas_incidente.assert_awaited_once()
         self.assertEqual(notificador.desencadenar_alertas_incidente.call_args.kwargs["tokens_contactos"], ["ExponentPushToken[c]"])
+
+    async def test_contacto_con_avisos_en_pausa_no_recibe_alerta(self):
+        db = base_de_datos()
+        for vinculo in db.tables["red_apoyo"]:
+            vinculo["redapo_avisos_pausados"] = True
+        client = FakeClient(db)
+        notificador = MagicMock()
+        servicio = AlertaService(RedApoyoRepository(client), AlertaTempranaRepository(client), notificador)
+        self.assertEqual(servicio.desencadenar_alertas(INCIDENTE, VICTIMA, 0, 0)["detalle"], "Sin contactos activos.")
+        self.assertNotIn("alerta_temprana", db.tables)
 
     async def test_sin_contactos_no_registra_ni_notifica(self):
         db = base_de_datos()

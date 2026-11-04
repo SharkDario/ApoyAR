@@ -3,9 +3,10 @@
 # Endpoints Protegidos para Administración del Sistema y Operadores de Autoridad
 # (CU-06, CU-09, RF-1.1, RNF-07).
 #
-# Aplica RBAC estricto:
-#   - Administrador: gestión de ciclo de vida de usuarios, auditoría técnica.
-#   - Autoridad: visualización de incidentes activos para respuesta operativa.
+# Aplica RBAC por permisos (tablas permiso y perfil_tiene_permiso):
+#   - usuario.gestionar / perfil.gestionar: usuarios del panel y perfiles.
+#   - incidente.monitorear: listado y mapa de incidentes.
+#   - incidente.correlacionar: sugerencias Haversine y vinculaciones.
 #
 # Capa de presentación: valida la entrada, aplica RBAC y delega en los servicios.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -18,10 +19,12 @@ from app.dependencies import (
     get_autenticacion_institucional_service,
     get_catalogo_service,
     get_operador_service,
+    get_perfil_service,
     get_supervision_service,
 )
 from app.schemas.admin import (
     ActualizarOperadorRequest,
+    ActualizarPerfilRequest,
     AgregarRolRequest,
     AsociarEvidenciaRequest,
     CambiarCargoActivoRequest,
@@ -32,20 +35,31 @@ from app.schemas.admin import (
     CrearOperadorRequest,
     LoginInstitucionalRequest,
     LoginMovilRequest,
+    PerfilRequest,
     RecuperarPasswordRequest,
     SugerenciasQuery,
     SuspenderOperadorRequest,
 )
-from app.services.auth_dependencies import get_current_active_user, require_role
+from app.services.auth_dependencies import get_current_active_user, require_permiso
 from app.services.autenticacion_institucional_service import AutenticacionInstitucionalService
 from app.services.catalogo_service import CatalogoInstitucionalService
 from app.services.operador_service import OperadorService
+from app.services.perfil_service import PerfilService
+from app.services.roles import (
+    P_INCIDENTE_CORRELACIONAR,
+    P_INCIDENTE_MONITOREAR,
+    P_PERFIL_GESTIONAR,
+    P_USUARIO_GESTIONAR,
+    permisos_de,
+)
 from app.services.supervision_service import SupervisionService
 
 router = APIRouter(prefix="/api/v1", tags=["admin_autoridad"])
 
-solo_administrador = require_role(["Administrador"])
-autoridad_o_administrador = require_role(["Autoridad", "Administrador"])
+solo_administrador = require_permiso(P_USUARIO_GESTIONAR)
+puede_monitorear = require_permiso(P_INCIDENTE_MONITOREAR)
+puede_correlacionar = require_permiso(P_INCIDENTE_CORRELACIONAR)
+puede_gestionar_perfiles = require_permiso(P_PERFIL_GESTIONAR)
 
 
 # ── 1. Endpoints de Usuario Autenticado / Perfil ─────────────────────────────
@@ -62,6 +76,7 @@ async def get_mi_perfil(
         "id": user["id"],
         "email": user.get("email"),
         "roles": user.get("roles", []),
+        "permisos": sorted(permisos_de(user)),
     }
 
 
@@ -335,13 +350,13 @@ async def cambiar_estado_cuenta(
 
 @router.get(
     "/autoridad/incidentes-activos",
-    summary="Consultar incidentes activos para consola de mando (Autoridad y Administrador)",
+    summary="Consultar incidentes activos para consola de mando (permiso incidente.monitorear)",
     description="Retorna los incidentes con estado 'en_curso' con paginación estricta de 10 en 10.",
 )
 async def listar_incidentes_activos_autoridad(
     page: int = 1,
     limit: int = 10,
-    current_op: Dict[str, Any] = Depends(autoridad_o_administrador),
+    current_op: Dict[str, Any] = Depends(puede_monitorear),
     service: SupervisionService = Depends(get_supervision_service),
 ):
     return service.listar_incidentes_activos(page, limit)
@@ -356,7 +371,7 @@ async def listar_incidentes_autoridad(
     estado: Optional[str] = None,
     page: int = 1,
     limit: int = 10,
-    current_op: Dict[str, Any] = Depends(autoridad_o_administrador),
+    current_op: Dict[str, Any] = Depends(puede_monitorear),
     service: SupervisionService = Depends(get_supervision_service),
 ):
     return service.listar_incidentes(estado, page, limit)
@@ -373,7 +388,7 @@ async def listar_incidentes_autoridad(
 )
 async def sugerir_coincidencias_haversine(
     body: SugerenciasQuery,
-    current_op: Dict[str, Any] = Depends(autoridad_o_administrador),
+    current_op: Dict[str, Any] = Depends(puede_correlacionar),
     service: SupervisionService = Depends(get_supervision_service),
 ):
     return service.sugerir_coincidencias(body)
@@ -389,7 +404,7 @@ async def sugerir_coincidencias_haversine(
 )
 async def asociar_evidencia_a_incidente(
     body: AsociarEvidenciaRequest,
-    current_op: Dict[str, Any] = Depends(autoridad_o_administrador),
+    current_op: Dict[str, Any] = Depends(puede_correlacionar),
     service: SupervisionService = Depends(get_supervision_service),
 ):
     return service.asociar_evidencia(body, current_op)
@@ -405,7 +420,70 @@ async def asociar_evidencia_a_incidente(
 )
 async def correlacionar_incidentes_haversine(
     body: CorrelacionarIncidentesRequest,
-    current_op: Dict[str, Any] = Depends(autoridad_o_administrador),
+    current_op: Dict[str, Any] = Depends(puede_correlacionar),
     service: SupervisionService = Depends(get_supervision_service),
 ):
     return service.correlacionar_incidentes(body, current_op)
+
+
+# ── 4. Perfiles y permisos (RBAC dinámico) ───────────────────────────────────
+
+@router.get(
+    "/admin/permisos",
+    summary="Catálogo de permisos (modulo.accion)",
+    description="Permisos civiles e institucionales. Un perfil del panel solo puede llevar permisos institucionales.",
+)
+async def listar_permisos(
+    admin_user: Dict[str, Any] = Depends(puede_gestionar_perfiles),
+    service: PerfilService = Depends(get_perfil_service),
+):
+    return {"status": "ok", "permisos": service.listar_permisos()}
+
+
+@router.get(
+    "/admin/perfiles",
+    summary="Listar perfiles con sus permisos",
+    description="Incluye los de sistema (Civil, Administrador, Autoridad), que no se modifican, y los personalizados.",
+)
+async def listar_perfiles(
+    current_user: Dict[str, Any] = Depends(solo_administrador),
+    service: PerfilService = Depends(get_perfil_service),
+):
+    return {"status": "ok", "perfiles": service.listar_perfiles()}
+
+
+@router.post(
+    "/admin/perfiles",
+    summary="Crear un perfil personalizado del panel",
+)
+async def crear_perfil(
+    body: PerfilRequest,
+    admin_user: Dict[str, Any] = Depends(puede_gestionar_perfiles),
+    service: PerfilService = Depends(get_perfil_service),
+):
+    return service.crear_perfil(body)
+
+
+@router.put(
+    "/admin/perfiles/{perfil_id}",
+    summary="Editar nombre, descripción, estado o permisos de un perfil personalizado",
+)
+async def actualizar_perfil(
+    perfil_id: str,
+    body: ActualizarPerfilRequest,
+    admin_user: Dict[str, Any] = Depends(puede_gestionar_perfiles),
+    service: PerfilService = Depends(get_perfil_service),
+):
+    return service.actualizar_perfil(perfil_id, body)
+
+
+@router.delete(
+    "/admin/perfiles/{perfil_id}",
+    summary="Eliminar un perfil personalizado (o desactivarlo si tiene usuarios)",
+)
+async def eliminar_perfil(
+    perfil_id: str,
+    admin_user: Dict[str, Any] = Depends(puede_gestionar_perfiles),
+    service: PerfilService = Depends(get_perfil_service),
+):
+    return service.eliminar_perfil(perfil_id)

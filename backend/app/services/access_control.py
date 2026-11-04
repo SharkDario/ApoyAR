@@ -16,12 +16,13 @@ from app.repositories.evidencia_repository import EvidenciaRepository
 from app.repositories.incidente_repository import IncidenteRepository
 from app.repositories.red_apoyo_repository import RedApoyoRepository
 from app.services.roles import (
-    ROL_ADMINISTRADOR,
+    P_EVIDENCIA_AUDITAR,
+    P_INCIDENTE_ACTUALIZAR,
+    P_INCIDENTE_MONITOREAR,
     ROL_AUTORIDAD,
-    ROL_CONTACTO,
-    ROL_TESTIGO,
-    ROL_VICTIMA,
+    es_operador_institucional,
     roles_de,
+    tiene_permiso,
 )
 
 COLUMNAS_INCIDENTE_ACCESO = (
@@ -116,12 +117,13 @@ class AccessControlService:
 
     def verificar_acceso_incidente(self, incidente_id: str, usuario: Dict[str, Any], accion: str = "read") -> Dict[str, Any]:
         """
-        Reglas:
+        Reglas (por permiso, tablas permiso y perfil_tiene_permiso):
         - Víctima titular: acceso total.
         - 'update_posicion': solo la víctima titular.
-        - 'update_estado': víctima titular, Autoridad o Administrador.
-        - 'live_gps': Autoridad con cargo activo e incidente activo; nunca Administrador puro.
-        - Autoridad: lectura. Administrador: lectura de metadatos.
+        - 'update_estado': víctima titular o permiso 'incidente.actualizar'.
+        - 'live_gps': permiso 'incidente.monitorear' e incidente activo; la Autoridad,
+          además, con cargo institucional activo.
+        - Lectura: permiso 'incidente.monitorear' o 'evidencia.auditar'.
         - Contacto: lectura si existe vínculo activo en `red_apoyo` y el incidente está 'en_curso'.
         """
         inc_uuid = _validar_uuid(incidente_id, "Identificador de incidente no es un UUID válido.")
@@ -141,25 +143,22 @@ class AccessControlService:
             raise AccesoDenegadoError("Acceso denegado (Anti-IDOR): Solo la víctima titular puede transmitir telemetría para este incidente.")
 
         if accion == "update_estado":
-            if ROL_AUTORIDAD in roles or ROL_ADMINISTRADOR in roles:
+            if tiene_permiso(usuario, P_INCIDENTE_ACTUALIZAR):
                 return incidente
             raise AccesoDenegadoError("Acceso denegado: No tiene permisos para cambiar el estado de este incidente.")
 
         if accion == "live_gps":
-            if ROL_ADMINISTRADOR in roles and ROL_AUTORIDAD not in roles:
-                raise AccesoDenegadoError("Acceso denegado: El perfil Administrador (IT) tiene vedado el acceso a la geolocalización en tiempo real de las víctimas.")
+            if not tiene_permiso(usuario, P_INCIDENTE_MONITOREAR):
+                raise AccesoDenegadoError("Acceso denegado: Su perfil no tiene permiso para ver la ubicación de los incidentes.")
             if ROL_AUTORIDAD in roles:
                 cargo = self._cargos.obtener_estado(user_id)
                 if not cargo or not cargo.get("carins_activo", False):
                     raise AccesoDenegadoError("Acceso denegado: Su cargo institucional se encuentra inactivo o no habilitado para monitoreo operativo.")
-                if incidente.get("inc_estado") not in ("en_curso", "activo") and incidente.get("estado") not in ("en_curso", "activo"):
-                    raise AccesoDenegadoError("Acceso denegado: La geolocalización en tiempo real solo está disponible mientras el incidente se encuentre en estado activo/SOS (Ley 25.326).")
-                return incidente
-
-        if ROL_AUTORIDAD in roles:
+            if incidente.get("inc_estado") not in ("en_curso", "activo") and incidente.get("estado") not in ("en_curso", "activo"):
+                raise AccesoDenegadoError("Acceso denegado: La geolocalización en tiempo real solo está disponible mientras el incidente se encuentre en estado activo/SOS (Ley 25.326).")
             return incidente
 
-        if ROL_ADMINISTRADOR in roles and accion == "read":
+        if accion == "read" and (tiene_permiso(usuario, P_INCIDENTE_MONITOREAR) or tiene_permiso(usuario, P_EVIDENCIA_AUDITAR)):
             return incidente
 
         if accion == "read":
@@ -183,9 +182,10 @@ class AccessControlService:
         """
         Matriz de Visibilidad:
         - Autor de la prueba o víctima titular del incidente: acceso soberano.
-        - Contacto de confianza y Administrador de TI puro: nunca (403).
-        - Autoridad: metadatos ('audit') siempre; contenido multimedia
-          ('download' / 'export' / 'play' / 'read_content') solo con consentimiento.
+        - Permiso 'evidencia.auditar' (Autoridad): metadatos ('audit') siempre;
+          contenido multimedia ('download' / 'export' / 'play' / 'read_content')
+          solo con consentimiento del titular.
+        - Operadores sin ese permiso (Administrador) y contactos: nunca (403).
         """
         ev_uuid = _validar_uuid(evidencia_id, "Identificador de evidencia no es un UUID válido.")
         evidencia = self._evidencias.obtener_por_id(ev_uuid)
@@ -196,54 +196,39 @@ class AccessControlService:
         user_id = usuario["id"]
         autor_id = str(evidencia.get("usu_id_usuario") or evidencia.get("usuario_id"))
         incidente_id = evidencia.get("inc_id_incidente") or evidencia.get("incidente_id")
-        roles = roles_de(usuario)
 
-        tiene_cargo_autoridad = False
-        if ROL_AUTORIDAD in roles:
-            tiene_cargo_autoridad = True
-        elif not (ROL_VICTIMA in roles or ROL_TESTIGO in roles or ROL_CONTACTO in roles):
-            # Solo se consulta el cargo si no es un rol puramente civil
-            try:
-                cargo = self._cargos.obtener_estado(user_id)
-                if cargo and cargo.get("carins_activo", False):
-                    tiene_cargo_autoridad = True
-            except Exception:
-                pass
-
-        es_admin_puro = (ROL_ADMINISTRADOR in roles) and (ROL_AUTORIDAD not in roles)
-        es_autoridad = (ROL_AUTORIDAD in roles) or (tiene_cargo_autoridad and not es_admin_puro)
-
-        if es_admin_puro:
-            raise AccesoDenegadoError("Acceso denegado: El perfil Administrador (IT) tiene vedado el acceso a evidencias probatorias y contenido multimedia.")
-
-        if ROL_CONTACTO in roles and not es_autoridad:
-            raise AccesoDenegadoError("Acceso denegado: Los contactos de confianza no tienen autorización para reproducir ni auditar evidencias multimedia íntimas.")
-
-        tiene_consentimiento = bool(evidencia.get("evi_consentimiento_exportacion", evidencia.get("consentimiento_exportacion")))
-        if incidente_id:
-            try:
-                inc = self._incidentes.obtener_por_id(str(incidente_id), "inc_consentimiento_exportacion")
-                if inc:
-                    inc_consent = bool(inc.get("inc_consentimiento_exportacion"))
-                    tiene_consentimiento = inc_consent and bool(evidencia.get("evi_consentimiento_exportacion", True))
-            except Exception:
-                pass
-
-        if es_autoridad and accion in ACCIONES_CONTENIDO_MULTIMEDIA:
-            if not tiene_consentimiento:
-                raise AccesoDenegadoError("Acceso denegado: Se requiere el consentimiento informado expreso de la víctima/testigo para acceder al contenido multimedia probatorio o exportarlo (Ley 25.326 / ISO 27037).")
+        if autor_id == user_id:
+            return evidencia
+        if incidente_id and self._es_victima_del_incidente(str(incidente_id), user_id):
             return evidencia
 
-        if not es_autoridad:
-            if autor_id == user_id:
-                return evidencia
-            if incidente_id and self._es_victima_del_incidente(str(incidente_id), user_id):
-                return evidencia
+        if not tiene_permiso(usuario, P_EVIDENCIA_AUDITAR):
+            if es_operador_institucional(usuario):
+                raise AccesoDenegadoError("Acceso denegado: Su perfil no tiene permiso para auditar evidencias probatorias ni contenido multimedia.")
+            raise AccesoDenegadoError("Acceso denegado (Anti-IDOR): No tiene autorización para auditar o consultar esta evidencia ajena.")
 
-        if es_autoridad:
-            return evidencia
+        if accion in ACCIONES_CONTENIDO_MULTIMEDIA and not self._tiene_consentimiento(evidencia, autor_id, incidente_id):
+            raise AccesoDenegadoError("Acceso denegado: Se requiere el consentimiento informado expreso de la víctima/testigo para acceder al contenido multimedia probatorio o exportarlo (Ley 25.326 / ISO 27037).")
+        return evidencia
 
-        raise AccesoDenegadoError("Acceso denegado (Anti-IDOR): No tiene autorización para auditar o consultar esta evidencia ajena.")
+    def _tiene_consentimiento(self, evidencia: Dict[str, Any], autor_id: str, incidente_id: Any) -> bool:
+        """
+        Consentimiento del titular. Para la prueba de la propia víctima cuentan el
+        del incidente y el de la evidencia; para la de un testigo (autor distinto
+        de la víctima, o sin incidente) cuenta solo el que dio el testigo.
+        """
+        consentimiento_evidencia = bool(evidencia.get("evi_consentimiento_exportacion", evidencia.get("consentimiento_exportacion")))
+        if not incidente_id:
+            return consentimiento_evidencia
+        try:
+            inc = self._incidentes.obtener_por_id(str(incidente_id), "usu_id_victima, inc_consentimiento_exportacion")
+        except Exception:
+            return consentimiento_evidencia
+        if not inc:
+            return consentimiento_evidencia
+        if str(inc.get("usu_id_victima")) != autor_id:
+            return consentimiento_evidencia
+        return bool(inc.get("inc_consentimiento_exportacion")) and bool(evidencia.get("evi_consentimiento_exportacion", True))
 
     def _es_victima_del_incidente(self, incidente_id: str, usuario_id: str) -> bool:
         try:

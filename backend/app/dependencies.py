@@ -35,6 +35,7 @@ from app.services.autenticacion_institucional_service import AutenticacionInstit
 from app.services.catalogo_service import CatalogoInstitucionalService
 from app.services.cuenta_service import CuentaService
 from app.services.evidencia_service import EvidenciaService
+from app.services.perfil_service import PerfilService
 from app.services.export_service import ExportService, export_service
 from app.services.exportacion_forense_service import ExportacionForenseService
 from app.services.geocoding import NominatimGeocoder
@@ -92,6 +93,10 @@ def get_usuario_repository(client: Client = Depends(get_supabase_client)) -> Usu
 
 def get_perfil_repository(client: Client = Depends(get_supabase_client)) -> PerfilRepository:
     return PerfilRepository(client)
+
+
+def get_perfil_service(perfiles: PerfilRepository = Depends(get_perfil_repository)) -> PerfilService:
+    return PerfilService(perfiles)
 
 
 def get_cargo_institucional_repository(client: Client = Depends(get_supabase_client)) -> CargoInstitucionalRepository:

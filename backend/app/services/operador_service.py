@@ -19,11 +19,12 @@ from app.repositories.usuario_repository import UsuarioRepository
 from app.schemas.admin import ActualizarOperadorRequest, AgregarRolRequest, CrearOperadorRequest
 from app.services.catalogo_service import nombre_cargo_estandar, resolver_id_cargo
 from app.services.password_policy import hash_institutional_password
-from app.services.roles import ROL_AUTORIDAD, ROL_VICTIMA, ROLES_INSTITUCIONALES, normalizar_rol
+from app.services.perfil_service import PerfilService
+from app.services.roles import PERFILES_SISTEMA, ROL_AUTORIDAD, ROL_CIVIL, ROLES_INSTITUCIONALES, normalizar_rol
 
 logger = logging.getLogger("apoyar.admin_autoridad")
 
-# Perfil 'Víctima' que los triggers de base de datos asignan automáticamente
+# Perfil 'Civil' (antes 'Victima') que el trigger de alta asigna automáticamente
 ID_PERFIL_VICTIMA_AUTOASIGNADO = "41909988-8cb7-44db-81c6-4699c2401d40"
 
 
@@ -135,10 +136,8 @@ class OperadorService:
                     if uid in resultados:
                         p = row.get("perfil") or {}
                         r_nom = normalizar_rol(p.get("prf_nombre") or p.get("nombre", ""))
-                        if r_nom:
-                            r_label = "Civil" if r_nom == ROL_VICTIMA else r_nom
-                            if r_label not in resultados[uid]["roles"]:
-                                resultados[uid]["roles"].append(r_label)
+                        if r_nom and r_nom not in resultados[uid]["roles"]:
+                            resultados[uid]["roles"].append(r_nom)
             except Exception as exc:
                 logger.warning("Aviso consultando roles para búsqueda: %s", exc)
 
@@ -180,19 +179,14 @@ class OperadorService:
             operadores = self._agrupar_por_usuario(asignaciones, email_map, persona_map, cargo_map)
 
             # Solo usuarios con al menos un rol institucional (los civiles puros no son operadores)
-            todos = [op for op in operadores.values() if any(r in ROLES_INSTITUCIONALES for r in op.get("roles", []))]
+            # Perfiles institucionales: los de sistema y los personalizados (todo lo que no es Civil)
+            todos = [op for op in operadores.values() if any(r != ROL_CIVIL for r in op.get("roles", []))]
 
             for op in todos:
-                roles_institucionales = [r for r in op.get("roles", []) if r in ROLES_INSTITUCIONALES]
+                roles_institucionales = [r for r in op.get("roles", []) if r != ROL_CIVIL]
                 any_active = any(op.get("estados_roles", {}).get(r) == "activo" for r in roles_institucionales)
                 op["estado_aprobacion"] = "activo" if any_active else "suspendido"
-
-                # En la tarjeta institucional se presenta 'Civil' en lugar de 'Víctima'
-                op["roles"] = ["Civil" if r == ROL_VICTIMA else r for r in op.get("roles", [])]
-                if "estados_roles" in op and ROL_VICTIMA in op["estados_roles"]:
-                    op["estados_roles"]["Civil"] = op["estados_roles"].pop(ROL_VICTIMA)
-                if ROL_VICTIMA in op.get("rol", ""):
-                    op["rol"] = op["rol"].replace(ROL_VICTIMA, "Civil")
+                op["perfiles_personalizados"] = [r for r in roles_institucionales if r not in PERFILES_SISTEMA]
 
             if estado in ("activo", "activos"):
                 todos = [op for op in todos if op["estado_aprobacion"] == "activo"]
@@ -300,9 +294,12 @@ class OperadorService:
         roles institucionales y, para Autoridad, su adscripción en `cargo_institucional`.
         """
         roles_a_asignar = solicitud.roles or ([solicitud.rol] if solicitud.rol else [ROL_AUTORIDAD])
+        asignables = self._perfiles_asignables()
         for r in roles_a_asignar:
-            if r not in ROLES_INSTITUCIONALES:
-                raise SolicitudInvalidaError(f"Rol institucional '{r}' no permitido. Opciones: 'Autoridad', 'Administrador'.")
+            if r not in asignables:
+                raise SolicitudInvalidaError(
+                    f"Perfil '{r}' no permitido. Opciones: {', '.join(sorted(asignables))}."
+                )
 
         dni_limpio = solicitud.dni.strip().replace(".", "").replace(" ", "")
         if len(dni_limpio) < 6:
@@ -343,7 +340,7 @@ class OperadorService:
         if not solicitud.usuario_id_existente:
             # Alta institucional desde cero: se purga el perfil civil auto-asignado por triggers
             try:
-                ids_victima = self._perfiles.buscar_ids_perfil("Victima")
+                ids_victima = self._perfiles.buscar_ids_perfil(ROL_CIVIL)
                 ids_victima.append(ID_PERFIL_VICTIMA_AUTOASIGNADO)
                 for vid in dict.fromkeys(ids_victima):
                     self._perfiles.eliminar_asignacion(user_id, vid)
@@ -446,8 +443,9 @@ class OperadorService:
     def agregar_rol(self, usuario_id: str, solicitud: AgregarRolRequest, admin: Dict[str, Any]) -> Dict[str, Any]:
         """Asignación irreversible (trazabilidad de auditoría)."""
         user_uuid = _uuid_valido(usuario_id)
-        if solicitud.rol not in ROLES_INSTITUCIONALES:
-            raise SolicitudInvalidaError("Solo se pueden agregar los roles 'Autoridad' o 'Administrador'.")
+        asignables = self._perfiles_asignables()
+        if solicitud.rol not in asignables:
+            raise SolicitudInvalidaError(f"Perfil '{solicitud.rol}' no permitido. Opciones: {', '.join(sorted(asignables))}.")
 
         ids = self._perfiles.buscar_ids_perfil(solicitud.rol)
         if not ids:
@@ -647,9 +645,55 @@ class OperadorService:
             except Exception as exc:
                 logger.warning("Aviso actualizando notas de perfil para %s: %s", user_uuid, exc)
 
+        # 4. Perfiles personalizados (los de sistema no se quitan: trazabilidad de auditoría)
+        if solicitud.perfiles_personalizados is not None:
+            self._sincronizar_perfiles_personalizados(user_uuid, solicitud.perfiles_personalizados, admin)
+
         logger.info("Operador institucional %s actualizado por administrador %s", user_uuid, admin.get("email"))
         return {
             "status": "ok",
             "message": "Operador institucional actualizado exitosamente.",
             "usuario_id": user_uuid,
         }
+
+    # ── Perfiles asignables ──────────────────────────────────────────────────
+
+    def _perfiles_asignables(self) -> Dict[str, Dict[str, Any]]:
+        """Perfiles institucionales activos (de sistema y personalizados) desde la base."""
+        try:
+            asignables = PerfilService(self._perfiles).perfiles_institucionales_asignables()
+            if asignables:
+                return asignables
+        except Exception as exc:
+            logger.warning("No se pudo leer el catálogo de perfiles (¿falta la migración 021?): %s", exc)
+        return {r: {"nombre": r, "sistema": True} for r in ROLES_INSTITUCIONALES}
+
+    def _sincronizar_perfiles_personalizados(self, user_uuid: str, pedidos: List[str], admin: Dict[str, Any]) -> None:
+        asignables = self._perfiles_asignables()
+        personalizados = {n: p for n, p in asignables.items() if not p.get("sistema")}
+        desconocidos = [n for n in pedidos if n not in personalizados]
+        if desconocidos:
+            raise SolicitudInvalidaError(f"Perfiles personalizados inexistentes o inactivos: {', '.join(desconocidos)}.")
+
+        actuales = {}
+        for fila in self._perfiles.listar_asignaciones_de_usuario(user_uuid):
+            nombre = normalizar_rol((fila.get("perfil") or {}).get("prf_nombre", ""))
+            if nombre and nombre not in PERFILES_SISTEMA:
+                actuales[nombre] = fila.get("prf_id_perfil")
+
+        for nombre, perfil_id in actuales.items():
+            if nombre not in pedidos and perfil_id:
+                self._perfiles.eliminar_asignacion(user_uuid, perfil_id)
+
+        ahora = _ahora_iso()
+        for nombre in pedidos:
+            if nombre in actuales:
+                continue
+            self._perfiles.upsert_asignacion({
+                "usu_id_usuario": user_uuid,
+                "prf_id_perfil": personalizados[nombre]["id"],
+                "usuprf_estado_aprobacion": "activo",
+                "usu_id_aprobado_por": admin["id"],
+                "usuprf_aprobado_en": ahora,
+                "usuprf_notas": f"Perfil {nombre} asignado por Administrador {admin.get('email', 'admin')}",
+            })

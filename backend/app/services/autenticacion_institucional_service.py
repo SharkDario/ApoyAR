@@ -23,7 +23,7 @@ from app.repositories.auth_gateway import SupabaseAuthGateway
 from app.repositories.perfil_repository import PerfilRepository
 from app.repositories.usuario_repository import UsuarioRepository
 from app.services.password_policy import hash_institutional_password, validar_complejidad_password
-from app.services.roles import ROL_AUTORIDAD, ROLES_INSTITUCIONALES, normalizar_rol
+from app.services.roles import ROL_AUTORIDAD, leer_perfil_asignado
 from app.services.seguridad_login_service import SeguridadLoginService
 
 logger = logging.getLogger("apoyar.admin_autoridad")
@@ -85,6 +85,7 @@ class AutenticacionInstitucionalService:
             self._seguridad.registrar_exito(email_clean)
 
         roles = self._roles_institucionales(user_id)
+        permisos = self._permisos_institucionales(user_id)
 
         signing_secret = self._settings.supabase_jwt_secret or self._settings.api_secret_key
         jwt_claims = {
@@ -106,7 +107,20 @@ class AutenticacionInstitucionalService:
             "user": {"id": user_id, "email": email_clean},
             "usuario": {"id": user_id, "email": email_clean},
             "roles": roles,
+            "permisos": permisos,
         }
+
+    def _permisos_institucionales(self, user_id: str) -> List[str]:
+        """Permisos de los perfiles institucionales activos (los que usa el panel para mostrar secciones)."""
+        permisos: set = set()
+        try:
+            for r in self._perfiles.listar_asignaciones_de_usuario(user_id):
+                perfil = leer_perfil_asignado(r)
+                if perfil["tipo"] == "institucional" and perfil["activo"] and perfil["estado"] == "activo":
+                    permisos |= perfil["permisos"]
+        except Exception as exc:
+            logger.warning("Aviso leyendo permisos de %s: %s", user_id, exc)
+        return sorted(permisos)
 
     def login_movil(self, email: str, password: str) -> Dict[str, Any]:
         """
@@ -157,16 +171,16 @@ class AutenticacionInstitucionalService:
         roles: List[str] = []
         try:
             estados = []
+            # Cualquier perfil institucional activo da acceso al panel: los de
+            # sistema (Autoridad, Administrador) y los personalizados del Administrador.
             for r in self._perfiles.listar_asignaciones_de_usuario(user_id):
-                p = r.get("perfil") or {}
-                nombre = normalizar_rol(p.get("prf_nombre") or p.get("nombre", ""))
-                estado = r.get("usuprf_estado_aprobacion") or r.get("estado_aprobacion", "activo")
-                if nombre in ROLES_INSTITUCIONALES:
-                    roles.append(nombre)
-                    estados.append(estado)
+                perfil = leer_perfil_asignado(r)
+                if perfil["tipo"] == "institucional" and perfil["activo"]:
+                    roles.append(perfil["nombre"])
+                    estados.append(perfil["estado"])
 
             if not roles:
-                raise AccesoDenegadoError("Acceso denegado: El usuario no cuenta con roles institucionales (Autoridad / Administrador).")
+                raise AccesoDenegadoError("Acceso denegado: El usuario no cuenta con un perfil institucional para el panel web.")
             if all(estado in ("suspendido", "revocado") for estado in estados):
                 raise AccesoDenegadoError("Acceso denegado: Cuenta de operador suspendida. Comuníquese con la administración del sistema.")
         except AccesoDenegadoError:

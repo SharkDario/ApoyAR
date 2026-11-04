@@ -72,6 +72,7 @@ import {
 } from 'lucide-react';
 import { supabase } from './src/lib/supabase';
 import { MapViewComponent, type IncidentMarker } from './src/components/MapViewComponent';
+import { PerfilesPanel } from './src/components/PerfilesPanel';
 import { palette, spacing, radii } from './src/theme/tokens';
 import {
   validateDni,
@@ -271,6 +272,9 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [userRole, setUserRole] = useState<string>('Operador');
+  // Permisos del usuario (tablas permiso y perfil_tiene_permiso): deciden qué secciones se muestran
+  const [permisos, setPermisos] = useState<string[]>([]);
+  const puede = useCallback((permiso: string) => permisos.includes(permiso), [permisos]);
 
   // Estados de Visibilidad de Contraseñas ("Ojito")
   const [showLoginPassword, setShowLoginPassword] = useState(false);
@@ -479,7 +483,10 @@ export default function App() {
   const [usersList, setUsersList] = useState<any[]>([]);
   const [inactivosList, setInactivosList] = useState<any[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
-  const [adminTab, setAdminTab] = useState<'activos' | 'inactivos' | 'crear'>('activos');
+  const [adminTab, setAdminTab] = useState<'activos' | 'inactivos' | 'crear' | 'perfiles'>('activos');
+  // Perfiles personalizados activos que se pueden asignar en el alta y en la edición
+  const [perfilesAsignables, setPerfilesAsignables] = useState<string[]>([]);
+  const [editPerfilesPersonalizados, setEditPerfilesPersonalizados] = useState<string[]>([]);
 
   // Paginación Operadores Activos e Inactivos (10 por página)
   const [operadoresPage, setOperadoresPage] = useState(1);
@@ -592,7 +599,7 @@ export default function App() {
   const [searchingCivil, setSearchingCivil] = useState(false);
   const [civilSearchResults, setCivilSearchResults] = useState<any[]>([]);
   const [selectedCivilUser, setSelectedCivilUser] = useState<any | null>(null);
-  const [selectedRolesAlta, setSelectedRolesAlta] = useState<('Autoridad' | 'Administrador')[]>(['Autoridad']);
+  const [selectedRolesAlta, setSelectedRolesAlta] = useState<string[]>(['Autoridad']);
 
   const [nuevoEmail, setNuevoEmail] = useState('');
   const [nuevoPassword, setNuevoPassword] = useState('');
@@ -970,7 +977,7 @@ export default function App() {
 
     showConfirmDialog({
       title: 'Confirmar Alta Institucional',
-      message: `Se registrará al operador con los roles: ${selectedRolesAlta.join(' y ')}. Recuerde que la asignación de roles es estrictamente auditable e irreversible. ¿Desea proceder?`,
+      message: `Se registrará al operador con los perfiles: ${selectedRolesAlta.join(', ')}. Autoridad y Administrador no se pueden quitar después (quedan registrados por auditoría); los perfiles personalizados sí. ¿Desea proceder?`,
       type: 'info',
       confirmText: 'Confirmar Alta',
       cancelText: 'Cancelar',
@@ -1187,6 +1194,27 @@ export default function App() {
     });
   };
 
+  // ── Perfiles personalizados asignables (RBAC dinámico) ─────────────────────
+  const cargarPerfilesAsignables = useCallback(async () => {
+    if (!session?.access_token) return;
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/v1/admin/perfiles`, {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) return;
+      const json = await res.json();
+      setPerfilesAsignables(
+        (json.perfiles || [])
+          .filter((p: any) => !p.sistema && p.tipo === 'institucional' && p.activo)
+          .map((p: any) => p.nombre)
+      );
+    } catch (_) {}
+  }, [apiBaseUrl, session?.access_token]);
+
+  useEffect(() => {
+    if (showUsersModal) cargarPerfilesAsignables();
+  }, [showUsersModal, cargarPerfilesAsignables]);
+
   // ── Edición de Operador Institucional (RF Gestión de Operadores) ───────────
   const handleAbrirEditarOperador = (usr: any) => {
     setTargetEditOperator(usr);
@@ -1216,6 +1244,8 @@ export default function App() {
     setEditCargoId(cargoMatch?.id_cargo ?? cargos[0]?.id_cargo ?? null);
 
     setEditLegajo(usr.legajo || '');
+    setEditPerfilesPersonalizados(usr.perfiles_personalizados || []);
+    cargarPerfilesAsignables();
     setShowEditOperatorModal(true);
   };
 
@@ -1237,6 +1267,7 @@ export default function App() {
         id_sede: editSedeId,
         id_cargo: editCargoId,
         legajo_o_matricula: editLegajo.trim() || undefined,
+        perfiles_personalizados: editPerfilesPersonalizados,
       };
 
       const res = await fetch(`${apiBaseUrl}/api/v1/admin/usuarios/${targetEditOperator.usuario_id}`, {
@@ -1639,10 +1670,12 @@ export default function App() {
         </View>
 
         <View style={styles.drawerActions}>
-          <TouchableOpacity style={[styles.actionBtn, { backgroundColor: colors.semantic.info }]} onPress={() => handleAbrirAuditoriaTestigo(testigo)}>
-            <FileText size={15} color="#FFFFFF" style={{ marginRight: 6 }} />
-            <Text style={styles.actionBtnText}>Auditar Evidencias Forenses</Text>
-          </TouchableOpacity>
+          {puede('evidencia.auditar') && (
+            <TouchableOpacity style={[styles.actionBtn, { backgroundColor: colors.semantic.info }]} onPress={() => handleAbrirAuditoriaTestigo(testigo)}>
+              <FileText size={15} color="#FFFFFF" style={{ marginRight: 6 }} />
+              <Text style={styles.actionBtnText}>Auditar Evidencias Forenses</Text>
+            </TouchableOpacity>
+          )}
 
           {testigo.incidente && (
             <TouchableOpacity style={[styles.actionBtn, { backgroundColor: colors.bg.overlay }]} onPress={() => handleVerIncidenteAsociado(testigo)}>
@@ -1651,7 +1684,7 @@ export default function App() {
             </TouchableOpacity>
           )}
 
-          {!asociado && tieneUbicacion && (
+          {!asociado && tieneUbicacion && puede('incidente.correlacionar') && (
             <TouchableOpacity style={[styles.actionBtn, { backgroundColor: '#4F46E5' }]} onPress={() => handleBuscarIncidentesCercanos(testigo)}>
               <Radio size={15} color="#FFFFFF" style={{ marginRight: 6 }} />
               <Text style={styles.actionBtnText}>Correlación Espaciotemporal</Text>
@@ -1929,6 +1962,7 @@ export default function App() {
           if (res.ok) {
             const profile = await res.json();
             const roles: string[] = profile.roles || [];
+            setPermisos(profile.permisos || []);
             if (roles.includes('Administrador')) {
               setUserRole('Administrador del Sistema');
               return;
@@ -1981,6 +2015,10 @@ export default function App() {
           const parsed = JSON.parse(savedInstSession);
           if (parsed && parsed.access_token) {
             setSession(parsed);
+            setPermisos(parsed.permisos || []);
+            // Refresca roles y permisos por si el Administrador los cambió
+            const uid = parsed.user?.id;
+            if (uid) verificarRolUsuario(uid, parsed.access_token, parsed.user?.email);
             const savedRole = window.localStorage.getItem('apoyar_user_role');
             if (savedRole) {
               setUserRole(savedRole);
@@ -2288,15 +2326,17 @@ export default function App() {
         token_type: json.token_type || 'bearer',
         user: json.usuario || json.user,
         roles: json.roles || [],
+        permisos: json.permisos || [],
       };
       setSession(localSession);
+      setPermisos(json.permisos || []);
 
       const roles: string[] = json.roles || [];
       const computedRole = roles.includes('Administrador')
         ? 'Administrador del Sistema'
         : roles.includes('Autoridad')
         ? 'Autoridad Judicial / Policial'
-        : 'Operador Institucional';
+        : roles.filter((r) => r !== 'Civil')[0] || 'Operador Institucional';
       setUserRole(computedRole);
 
       if (typeof window !== 'undefined' && window.localStorage) {
@@ -2324,6 +2364,7 @@ export default function App() {
     }
     await supabase.auth.signOut();
     setSession(null);
+    setPermisos([]);
     setIncidentes([]);
     setSelectedIncidente(null);
   };
@@ -2710,7 +2751,7 @@ export default function App() {
       }));
   }, [incidentesFiltrados, verTestigos, testigos]);
 
-  const puedeVerTestigos = !(session as any)?.roles || (session as any).roles.includes('Autoridad');
+  const puedeVerTestigos = puede('evidencia.auditar');
   const paginaLista = verTestigos ? testigosPage : incidentesPage;
   const totalPaginasLista = verTestigos ? testigosTotalPages : incidentesTotalPages;
 
@@ -3354,7 +3395,7 @@ export default function App() {
           )}
 
           {/* Botones de Gestión y Creación de Operarios (Para Administradores) */}
-          {(userRole.includes('Administrador') || (session as any)?.roles?.includes('Administrador') || session?.user?.email?.toLowerCase().includes('admin') || session?.user?.email === 'mdarioc1998@gmail.com') && (
+          {puede('usuario.gestionar') && (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               {/* Botón Gestión de Operadores */}
               <TouchableOpacity
@@ -4043,24 +4084,28 @@ export default function App() {
 
               {/* Botones Operativos de Acción */}
               <View style={styles.drawerActions}>
-                <TouchableOpacity
-                  style={[styles.actionBtn, { backgroundColor: colors.semantic.info }]}
-                  onPress={() => handleAbrirAuditoria(selectedIncidente)}
-                >
-                  <FileText size={15} color="#FFFFFF" style={{ marginRight: 6 }} />
-                  <Text style={styles.actionBtnText}>Auditar Evidencias Forenses</Text>
-                </TouchableOpacity>
+                {puede('evidencia.auditar') && (
+                  <TouchableOpacity
+                    style={[styles.actionBtn, { backgroundColor: colors.semantic.info }]}
+                    onPress={() => handleAbrirAuditoria(selectedIncidente)}
+                  >
+                    <FileText size={15} color="#FFFFFF" style={{ marginRight: 6 }} />
+                    <Text style={styles.actionBtnText}>Auditar Evidencias Forenses</Text>
+                  </TouchableOpacity>
+                )}
 
                 {/* Botón Correlación Espaciotemporal Haversine (RF-3.6 / CU-10) */}
-                <TouchableOpacity
-                  style={[styles.actionBtn, { backgroundColor: '#4F46E5' }]}
-                  onPress={() => handleAbrirCorrelacionHaversine(selectedIncidente)}
-                >
-                  <Radio size={15} color="#FFFFFF" style={{ marginRight: 6 }} />
-                  <Text style={styles.actionBtnText}>Correlación Espaciotemporal</Text>
-                </TouchableOpacity>
+                {puede('incidente.correlacionar') && (
+                  <TouchableOpacity
+                    style={[styles.actionBtn, { backgroundColor: '#4F46E5' }]}
+                    onPress={() => handleAbrirCorrelacionHaversine(selectedIncidente)}
+                  >
+                    <Radio size={15} color="#FFFFFF" style={{ marginRight: 6 }} />
+                    <Text style={styles.actionBtnText}>Correlación Espaciotemporal</Text>
+                  </TouchableOpacity>
+                )}
 
-                {selectedIncidente.estado === 'en_curso' ? (
+                {!puede('incidente.actualizar') ? null : selectedIncidente.estado === 'en_curso' ? (
                   <TouchableOpacity
                     style={[styles.actionBtn, { backgroundColor: colors.semantic.success }]}
                     onPress={() => handleCambiarEstado(selectedIncidente, 'cerrado')}
@@ -4480,6 +4525,25 @@ export default function App() {
                   Dar de Alta Nuevo Operario
                 </Text>
               </TouchableOpacity>
+              {puede('perfil.gestionar') && (
+                <TouchableOpacity
+                  style={[
+                    styles.adminTabBtn,
+                    adminTab === 'perfiles' && { borderBottomColor: colors.semantic.info, borderBottomWidth: 3 },
+                  ]}
+                  onPress={() => setAdminTab('perfiles')}
+                >
+                  <KeyRound size={16} color={adminTab === 'perfiles' ? colors.semantic.info : colors.text.secondary} style={{ marginRight: 6 }} />
+                  <Text
+                    style={[
+                      styles.adminTabBtnText,
+                      { color: adminTab === 'perfiles' ? colors.semantic.info : colors.text.secondary, fontWeight: adminTab === 'perfiles' ? '700' : '500' },
+                    ]}
+                  >
+                    Perfiles y permisos
+                  </Text>
+                </TouchableOpacity>
+              )}
             </View>
 
             {/* Barra de Búsqueda y Filtrado (institución, cargo, DNI, nombre, apellido, email) */}
@@ -4539,7 +4603,7 @@ export default function App() {
                     {usersList
                       .filter((usr) => {
                         const roles = usr.roles && usr.roles.length > 0 ? usr.roles : [usr.rol || 'Operador'];
-                        return roles.some((r: string) => r === 'Autoridad' || r === 'Administrador');
+                        return roles.some((r: string) => r !== 'Civil' && r !== 'Víctima');
                       })
                       .filter((usr) => {
                         const q = operadoresSearchQuery.trim().toLowerCase();
@@ -4878,7 +4942,7 @@ export default function App() {
                     {inactivosList
                       .filter((usr) => {
                         const roles = usr.roles && usr.roles.length > 0 ? usr.roles : [usr.rol || 'Operador'];
-                        return roles.some((r: string) => r === 'Autoridad' || r === 'Administrador');
+                        return roles.some((r: string) => r !== 'Civil' && r !== 'Víctima');
                       })
                       .filter((usr) => {
                         const q = operadoresSearchQuery.trim().toLowerCase();
@@ -5129,6 +5193,15 @@ export default function App() {
                   </>
                 )}
               </ScrollView>
+            ) : adminTab === 'perfiles' ? (
+              /* TAB 4: PERFILES Y PERMISOS (RBAC dinámico) */
+              <PerfilesPanel
+                apiBaseUrl={apiBaseUrl}
+                token={session?.access_token}
+                colors={colors}
+                onToast={showToast}
+                onCambio={cargarPerfilesAsignables}
+              />
             ) : (
               /* TAB 3: ALTA DE OPERADOR */
               <ScrollView style={styles.adminModalBody}>
@@ -5224,9 +5297,9 @@ export default function App() {
 
                 {/* 2. SELECCIÓN DE ROLES INSTITUCIONALES (MULTI-ROL) */}
                 <View style={styles.formRow}>
-                  <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Roles Institucionales Asignados * (Multi-Rol)</Text>
+                  <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Perfiles asignados * (Multi-Perfil)</Text>
                   <Text style={{ fontSize: 11, color: colors.text.disabled, marginBottom: 6 }}>
-                    Puede asignar un rol o ambos simultáneamente según las funciones del operador.
+                    Elegí uno o más perfiles: Autoridad, Administrador o un perfil personalizado. Si no querés que sea ni Autoridad ni Administrador, elegí solo un perfil personalizado.
                   </Text>
                   <View style={{ flexDirection: 'row', gap: 12 }}>
                     <TouchableOpacity
@@ -5241,7 +5314,7 @@ export default function App() {
                       onPress={() => {
                         setSelectedRolesAlta((prev) =>
                           prev.includes('Autoridad')
-                            ? prev.length > 1 ? prev.filter((r) => r !== 'Autoridad') : prev
+                            ? prev.filter((r) => r !== 'Autoridad')
                             : [...prev, 'Autoridad']
                         );
                       }}
@@ -5283,7 +5356,7 @@ export default function App() {
                       onPress={() => {
                         setSelectedRolesAlta((prev) =>
                           prev.includes('Administrador')
-                            ? prev.length > 1 ? prev.filter((r) => r !== 'Administrador') : prev
+                            ? prev.filter((r) => r !== 'Administrador')
                             : [...prev, 'Administrador']
                         );
                       }}
@@ -5312,6 +5385,57 @@ export default function App() {
                         Gestión técnica global, administración de operadores y auditoría institucional.
                       </Text>
                     </TouchableOpacity>
+                  </View>
+                  <View style={{ marginTop: spacing.sm }}>
+                      <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Otros perfiles (personalizados)</Text>
+                      {perfilesAsignables.length === 0 && (
+                        <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                          <Text style={{ fontSize: 12, color: colors.text.disabled }}>
+                            Todavía no hay perfiles personalizados.
+                          </Text>
+                          {puede('perfil.gestionar') && (
+                            <TouchableOpacity onPress={() => setAdminTab('perfiles')}>
+                              <Text style={{ fontSize: 12, fontWeight: '700', color: colors.semantic.info }}>Crear uno en «Perfiles y permisos»</Text>
+                            </TouchableOpacity>
+                          )}
+                        </View>
+                      )}
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                        {perfilesAsignables.map((nombrePerfil) => {
+                          const marcado = selectedRolesAlta.includes(nombrePerfil);
+                          return (
+                            <TouchableOpacity
+                              key={nombrePerfil}
+                              onPress={() =>
+                                setSelectedRolesAlta((prev) =>
+                                  prev.includes(nombrePerfil)
+                                    ? prev.filter((r) => r !== nombrePerfil)
+                                    : [...prev, nombrePerfil]
+                                )
+                              }
+                              style={[
+                                styles.userRoleTag,
+                                {
+                                  backgroundColor: marcado ? colors.semantic.infoBg : colors.bg.elevated,
+                                  borderColor: marcado ? colors.semantic.info : colors.border.default,
+                                  flexDirection: 'row',
+                                  alignItems: 'center',
+                                },
+                              ]}
+                            >
+                              {marcado && <Check size={12} color={colors.semantic.info} style={{ marginRight: 4 }} />}
+                              <Text style={{ fontSize: 12, fontWeight: '700', color: marcado ? colors.semantic.info : colors.text.primary }}>
+                                {nombrePerfil}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                      {selectedRolesAlta.length === 0 && (
+                        <Text style={{ fontSize: 12, color: colors.semantic.warning, marginTop: 6 }}>
+                          Elegí al menos un perfil para el operador.
+                        </Text>
+                      )}
                   </View>
                 </View>
 
@@ -6421,6 +6545,44 @@ export default function App() {
                   multiline
                 />
               </View>
+
+              {perfilesAsignables.length > 0 && (
+                <View style={styles.formRow}>
+                  <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Perfiles personalizados</Text>
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                    {perfilesAsignables.map((nombrePerfil) => {
+                      const marcado = editPerfilesPersonalizados.includes(nombrePerfil);
+                      return (
+                        <TouchableOpacity
+                          key={nombrePerfil}
+                          onPress={() =>
+                            setEditPerfilesPersonalizados((prev) =>
+                              prev.includes(nombrePerfil) ? prev.filter((r) => r !== nombrePerfil) : [...prev, nombrePerfil]
+                            )
+                          }
+                          style={[
+                            styles.userRoleTag,
+                            {
+                              backgroundColor: marcado ? colors.semantic.infoBg : colors.bg.elevated,
+                              borderColor: marcado ? colors.semantic.info : colors.border.default,
+                              flexDirection: 'row',
+                              alignItems: 'center',
+                            },
+                          ]}
+                        >
+                          {marcado && <Check size={12} color={colors.semantic.info} style={{ marginRight: 4 }} />}
+                          <Text style={{ fontSize: 12, fontWeight: '700', color: marcado ? colors.semantic.info : colors.text.primary }}>
+                            {nombrePerfil}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                  <Text style={{ fontSize: 11, color: colors.text.disabled, marginTop: 4 }}>
+                    Autoridad y Administrador no se quitan desde acá (quedan registrados por auditoría).
+                  </Text>
+                </View>
+              )}
 
               {/* Botones de Acción */}
               <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 12, marginTop: 8 }}>

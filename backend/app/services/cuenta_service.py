@@ -15,7 +15,7 @@ from app.repositories.evidencia_repository import EvidenciaRepository
 from app.repositories.evidencia_storage import EvidenciaStorage
 from app.repositories.perfil_repository import PerfilRepository
 from app.repositories.usuario_repository import UsuarioRepository
-from app.services.roles import ROL_VICTIMA, normalizar_rol
+from app.services.roles import ROL_CIVIL, leer_perfil_asignado, permisos_por_defecto
 
 logger = logging.getLogger("apoyar.cuenta")
 
@@ -69,24 +69,24 @@ class CuentaService:
             logger.debug("Aviso consultando GoTrue para %s: %s", user_id, exc)
 
         roles: List[str] = []
+        permisos: set = set()
         try:
             for row in self._perfiles.listar_asignaciones_de_usuario(user_id):
-                estado_ap = row.get("usuprf_estado_aprobacion") or row.get("estado_aprobacion")
-                if estado_ap and estado_ap != "activo":
+                perfil = leer_perfil_asignado(row)
+                if perfil["estado"] != "activo" or not perfil["activo"] or not perfil["nombre"]:
                     continue
-                p_data = row.get("perfil")
-                if isinstance(p_data, dict):
-                    nombre_p = p_data.get("prf_nombre") or p_data.get("nombre")
-                    if nombre_p:
-                        roles.append(normalizar_rol(nombre_p))
+                roles.append(perfil["nombre"])
+                permisos |= perfil["permisos"]
         except Exception as exc:
             logger.warning("Aviso consultando perfiles de %s: %s", user_id, exc)
 
         if not roles:
-            roles = [ROL_VICTIMA]
+            roles = [ROL_CIVIL]
+            permisos = permisos_por_defecto(roles)
 
         # Sin duplicados y en orden estable (el orden de un set variaba entre procesos)
         identidad["roles"] = list(dict.fromkeys(roles))
+        identidad["permisos"] = sorted(permisos)
         return identidad
 
     def eliminar_cuenta(self, usuario_id: str) -> None:

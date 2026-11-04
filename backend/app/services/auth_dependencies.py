@@ -30,7 +30,7 @@ from app.repositories.red_apoyo_repository import RedApoyoRepository
 from app.services.access_control import AccessControlService
 from app.services.cuenta_service import CuentaService
 from app.services.jwt_verifier import JwtVerifier
-from app.services.roles import normalizar_rol
+from app.services.roles import normalizar_rol, permisos_de
 
 __all__ = [
     "configurar_clave_test",
@@ -40,6 +40,7 @@ __all__ = [
     "get_optional_current_active_user",
     "normalizar_rol",
     "rechazar_api_secret_invalido",
+    "require_permiso",
     "require_role",
     "verify_evidence_access",
     "verify_incident_ownership",
@@ -125,6 +126,21 @@ def require_role(allowed_roles: List[str]) -> Callable:
         return user
 
     return _role_checker
+
+
+def require_permiso(*permisos: str) -> Callable:
+    """Exige al menos uno de los permisos indicados (tablas permiso y perfil_tiene_permiso)."""
+    requeridos = set(permisos)
+
+    async def _permiso_checker(user: Dict[str, Any] = Depends(get_current_active_user)) -> Dict[str, Any]:
+        if not permisos_de(user) & requeridos:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Acceso denegado: su perfil no tiene el permiso requerido ({', '.join(sorted(requeridos))}).",
+            )
+        return user
+
+    return _permiso_checker
 
 
 # ── 2. X-Api-Secret ──────────────────────────────────────────────────────────

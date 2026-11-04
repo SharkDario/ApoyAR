@@ -43,7 +43,7 @@ class CambiarPasswordRequest(BaseModel):
 
 
 class AgregarRolRequest(BaseModel):
-    rol: str = Field(..., description="'Autoridad' o 'Administrador'")
+    rol: str = Field(..., description="Perfil institucional: 'Autoridad', 'Administrador' o uno personalizado")
     id_institucion: Optional[int] = Field(default=None, description="ID de Institución")
     id_dependencia: Optional[int] = Field(default=None, description="ID de Dependencia")
     id_sede: Optional[int] = Field(default=None, description="ID de Sede física")
@@ -60,7 +60,7 @@ class CrearOperadorRequest(BaseModel):
     email: str = Field(..., description="Correo electrónico institucional")
     password: str = Field(..., min_length=8, description="Contraseña de acceso seguro")
     rol: Optional[str] = Field(default="Autoridad", description="'Autoridad' o 'Administrador'")
-    roles: Optional[List[str]] = Field(default=None, description="Lista de roles asignados simultáneamente")
+    roles: Optional[List[str]] = Field(default=None, description="Perfiles institucionales asignados (de sistema o personalizados)")
     usuario_id_existente: Optional[str] = Field(default=None, description="UUID de usuario existente para vinculación")
     nombre: str = Field(..., min_length=1, description="Nombre de pila según DNI")
     apellido: str = Field(..., min_length=1, description="Apellido según DNI")
@@ -95,6 +95,10 @@ class ActualizarOperadorRequest(BaseModel):
     id_cargo: Optional[int] = Field(default=None, description="ID de Cargo")
     nombre_cargo: Optional[str] = Field(default=None, description="Nombre del Cargo")
     legajo_o_matricula: Optional[str] = Field(default=None, description="Legajo o matrícula institucional")
+    perfiles_personalizados: Optional[List[str]] = Field(
+        default=None,
+        description="Perfiles personalizados del operador (reemplaza los actuales). Los de sistema no se quitan.",
+    )
 
 
 class CambiarCargoActivoRequest(BaseModel):
@@ -120,3 +124,16 @@ class CorrelacionarIncidentesRequest(BaseModel):
     incidente_origen_id: str = Field(..., description="ID del incidente base o expediente")
     incidente_destino_id: str = Field(..., description="ID del incidente o evento correlacionado")
     justificacion_operativa: str = Field(..., min_length=10, description="Motivación pericial y operativa fundada")
+
+
+class PerfilRequest(BaseModel):
+    nombre: str = Field(..., min_length=3, max_length=50, description="Nombre del perfil personalizado")
+    descripcion: Optional[str] = Field(default=None, max_length=255)
+    permisos: List[str] = Field(default_factory=list, description="Permisos institucionales (modulo.accion)")
+
+
+class ActualizarPerfilRequest(BaseModel):
+    nombre: Optional[str] = Field(default=None, min_length=3, max_length=50)
+    descripcion: Optional[str] = Field(default=None, max_length=255)
+    permisos: Optional[List[str]] = Field(default=None, description="Reemplaza los permisos del perfil")
+    activo: Optional[bool] = Field(default=None)

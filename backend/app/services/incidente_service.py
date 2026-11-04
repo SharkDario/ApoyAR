@@ -19,7 +19,7 @@ from app.schemas.incidentes import ActivarIncidenteRequest, ActualizarEstadoRequ
 from app.services.access_control import AccessControlService
 from app.services.alerta_service import AlertaService, lanzar_en_segundo_plano
 from app.services.geocoding import NominatimGeocoder
-from app.services.roles import ROL_ADMINISTRADOR, ROL_AUTORIDAD
+from app.services.roles import P_INCIDENTE_MONITOREAR, ROL_AUTORIDAD, es_operador_institucional, tiene_permiso
 
 logger = logging.getLogger("apoyar.incidentes")
 
@@ -62,8 +62,7 @@ class IncidenteService:
         """
         victima_id = str(solicitud.victima_id)
         if usuario and victima_id != usuario["id"]:
-            roles = usuario.get("roles", [])
-            if ROL_AUTORIDAD not in roles and ROL_ADMINISTRADOR not in roles:
+            if not es_operador_institucional(usuario):
                 raise AccesoDenegadoError("Acceso denegado (Anti-IDOR): No puede activar emergencias en nombre de otra víctima.")
 
         incidente_id = str(solicitud.incidente_id)
@@ -213,13 +212,15 @@ class IncidenteService:
         roles = usuario.get("roles", [])
         user_id = usuario["id"]
         es_victima = str(incidente.get("usu_id_victima") or incidente.get("victima_id")) == user_id
-        es_admin_ti = ROL_ADMINISTRADOR in roles and ROL_AUTORIDAD not in roles
         datos = dict(incidente)
 
-        if es_admin_ti:
-            # El Administrador de TI nunca ve ubicaciones en tiempo real
-            self._ocultar_ubicacion(datos, "Bloqueado por perfil Administrador IT (Ley 25.326)")
-        elif ROL_AUTORIDAD in roles and not es_victima:
+        if es_victima or not es_operador_institucional(usuario):
+            return datos
+
+        if not tiene_permiso(usuario, P_INCIDENTE_MONITOREAR):
+            # Operador sin permiso de monitoreo: no ve la ubicación (Ley 25.326)
+            self._ocultar_ubicacion(datos, "Su perfil no tiene permiso de monitoreo (Ley 25.326)")
+        elif ROL_AUTORIDAD in roles:
             cargo = self._cargos.obtener_estado(user_id)
             cargo_activo = bool(cargo and cargo.get("carins_activo", False))
             estado = datos.get("inc_estado") or datos.get("estado")

@@ -53,7 +53,7 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.json(), {"status": "ok", "incidente": {"inc_id_incidente": INCIDENTE}})
         incidente_id, usuario = servicio.obtener_incidente.call_args.args
         self.assertEqual(incidente_id, INCIDENTE)
-        self.assertEqual(usuario["roles"], ["Víctima"])
+        self.assertEqual(usuario["roles"], ["Civil"])
 
     async def test_error_de_aplicacion_se_traduce_a_http(self):
         servicio = MagicMock()
@@ -76,6 +76,18 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
     async def test_rbac_de_consola_de_autoridad(self):
         resp = await self.solicitar("GET", "/api/v1/autoridad/incidentes-activos", headers={"Authorization": f"Bearer {token()}"})
         self.assertEqual(resp.status_code, 403)
+
+    async def test_haversine_exige_permiso_de_correlacion(self):
+        self.db.tables["perfil"] = [{"prf_id_perfil": "p-admin", "prf_nombre": "Administrador"}]
+        self.db.tables["usuario_tiene_perfil"] = [{
+            "usu_id_usuario": USUARIO, "prf_id_perfil": "p-admin", "usuprf_estado_aprobacion": "activo",
+            "perfil": {"prf_nombre": "Administrador"},
+        }]
+        cuerpo = {"latitud": -26.1, "longitud": -58.1, "fecha_hora": "2026-11-03T10:00:00Z"}
+        resp = await self.solicitar("POST", "/api/v1/autoridad/sugerencias-coincidencias", json=cuerpo,
+                                    headers={"Authorization": f"Bearer {token()}"})
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("incidente.correlacionar", resp.json()["detail"])
 
     async def test_catalogo_usa_semilla_si_la_tabla_no_responde(self):
         self.db.fail_tables.add("cargo")
