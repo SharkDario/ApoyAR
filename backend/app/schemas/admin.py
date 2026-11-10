@@ -4,8 +4,8 @@
 # administración de operadores y consola de Autoridad.
 # ─────────────────────────────────────────────────────────────────────────────
 
-from datetime import datetime
-from typing import List, Optional
+from datetime import date, datetime
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -137,3 +137,45 @@ class ActualizarPerfilRequest(BaseModel):
     descripcion: Optional[str] = Field(default=None, max_length=255)
     permisos: Optional[List[str]] = Field(default=None, description="Reemplaza los permisos del perfil")
     activo: Optional[bool] = Field(default=None)
+
+
+# ── Estadísticas anónimas de emergencias (RF-4.4 / CU-11) ────────────────────
+
+class FiltroEstadisticasQuery(BaseModel):
+    """Filtros del tablero de estadísticas. Las fechas son días calendario de Argentina (UTC-3)."""
+    fecha_desde: Optional[date] = Field(default=None, description="Primer día incluido (YYYY-MM-DD)")
+    fecha_hasta: Optional[date] = Field(default=None, description="Último día incluido (YYYY-MM-DD)")
+    departamento: Optional[str] = Field(default=None, max_length=60, description="Departamento provincial")
+    localidad: Optional[str] = Field(default=None, max_length=80, description="Localidad")
+    origen: Optional[Literal["manual", "automatico"]] = Field(default=None, description="Cómo se activó el Modo Resguardo")
+
+
+class ResumenEstadisticasResponse(BaseModel):
+    """Totales agregados: no lleva nombres, documentos, teléfonos, direcciones exactas ni evidencias."""
+    generado_en: str
+    filtros: Dict[str, Any]
+    total_incidentes: int
+    incidentes_en_curso: int
+    incidentes_cerrados: int
+    victimas_distintas: int
+    duracion_promedio_min: Optional[float]
+    duracion_mediana_min: Optional[float]
+    duracion_p90_min: Optional[float]
+    casos_con_duracion: int
+    distribucion_duracion: List[Dict[str, Any]]
+    porcentaje_automatico: float
+    porcentaje_manual: float
+    por_origen: List[Dict[str, Any]]
+    serie_mensual: List[Dict[str, Any]]
+    por_hora: List[Dict[str, Any]]
+    por_dia_semana: List[Dict[str, Any]]
+    matriz_horaria: List[Dict[str, Any]]
+    por_departamento: List[Dict[str, Any]]
+    por_localidad: List[Dict[str, Any]]
+    por_barrio: List[Dict[str, Any]]
+    sin_ubicacion: int
+    puntos_calor: List[Dict[str, Any]]
+    piramide_etaria: List[Dict[str, Any]]
+    por_genero: List[Dict[str, Any]]
+    vinculos_red_apoyo: List[Dict[str, Any]]
+    red_promedio_contactos: Optional[float]

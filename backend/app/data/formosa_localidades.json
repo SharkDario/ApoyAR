@@ -1,0 +1,446 @@
+{
+ "fuente": "Servicio de Normalización de Datos Geográficos de Argentina (Georef, datos.gob.ar), localidades BAHRA de la provincia de Formosa.",
+ "localidades": [
+  {
+   "nombre": "Fortín Soledad",
+   "departamento": "Bermejo",
+   "lat": -24.14875,
+   "lon": -60.68996,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Guadalcazar",
+   "departamento": "Bermejo",
+   "lat": -23.67295,
+   "lon": -61.16361,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "La Rinconada",
+   "departamento": "Bermejo",
+   "lat": -23.4948,
+   "lon": -61.57665,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Laguna Yema",
+   "departamento": "Bermejo",
+   "lat": -24.25552,
+   "lon": -61.24199,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Lamadrid",
+   "departamento": "Bermejo",
+   "lat": -23.89695,
+   "lon": -60.75455,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Los Chiriguanos",
+   "departamento": "Bermejo",
+   "lat": -24.09881,
+   "lon": -61.46197,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Pozo de Maza",
+   "departamento": "Bermejo",
+   "lat": -23.57032,
+   "lon": -61.70806,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Pozo del Mortero",
+   "departamento": "Bermejo",
+   "lat": -24.40717,
+   "lon": -61.02621,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Vaca Perdida",
+   "departamento": "Bermejo",
+   "lat": -23.49959,
+   "lon": -61.64843,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Colonia Pastoril",
+   "departamento": "Formosa",
+   "lat": -25.67269,
+   "lon": -58.26149,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Formosa",
+   "departamento": "Formosa",
+   "lat": -26.18501,
+   "lon": -58.1749,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Gran Guardia",
+   "departamento": "Formosa",
+   "lat": -25.86276,
+   "lon": -58.88573,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Mariano Boedo",
+   "departamento": "Formosa",
+   "lat": -26.10932,
+   "lon": -58.48775,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Mojón de Fierro",
+   "departamento": "Formosa",
+   "lat": -26.03319,
+   "lon": -58.04905,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "San Hilario",
+   "departamento": "Formosa",
+   "lat": -26.02999,
+   "lon": -58.65226,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Banco Payaguá",
+   "departamento": "Laishí",
+   "lat": -26.70742,
+   "lon": -58.33834,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "General Lucio V. Mansilla",
+   "departamento": "Laishí",
+   "lat": -26.65769,
+   "lon": -58.63046,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Herradura",
+   "departamento": "Laishí",
+   "lat": -26.48985,
+   "lon": -58.31162,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "San Francisco de Laishi",
+   "departamento": "Laishí",
+   "lat": -26.24387,
+   "lon": -58.62961,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Tatané",
+   "departamento": "Laishí",
+   "lat": -26.39815,
+   "lon": -58.35734,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Villa Escolar",
+   "departamento": "Laishí",
+   "lat": -26.62192,
+   "lon": -58.66971,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Ingeniero Guillermo N. Juárez",
+   "departamento": "Matacos",
+   "lat": -23.90374,
+   "lon": -61.84243,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Bartolomé de las Casas",
+   "departamento": "Patiño",
+   "lat": -25.40906,
+   "lon": -59.57142,
+   "categoria": "Entidad"
+  },
+  {
+   "nombre": "Bartolomé de las Casas",
+   "departamento": "Patiño",
+   "lat": -25.40805,
+   "lon": -59.57076,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Colonia Sarmiento",
+   "departamento": "Patiño",
+   "lat": -24.64392,
+   "lon": -59.43406,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Comandante Fontana",
+   "departamento": "Patiño",
+   "lat": -25.33064,
+   "lon": -59.68099,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Comunidad Aborigen Bartolomé de las Casas",
+   "departamento": "Patiño",
+   "lat": -25.34868,
+   "lon": -59.61223,
+   "categoria": "Entidad"
+  },
+  {
+   "nombre": "El Recreo",
+   "departamento": "Patiño",
+   "lat": -25.04078,
+   "lon": -59.29424,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Estanislao del Campo",
+   "departamento": "Patiño",
+   "lat": -25.05355,
+   "lon": -60.09064,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Fortín Cabo 1º Lugones",
+   "departamento": "Patiño",
+   "lat": -24.28642,
+   "lon": -59.82768,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Fortín Sargento 1º Leyes",
+   "departamento": "Patiño",
+   "lat": -24.55411,
+   "lon": -59.38512,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Ibarreta",
+   "departamento": "Patiño",
+   "lat": -25.2145,
+   "lon": -59.85889,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Juan G. Bazán",
+   "departamento": "Patiño",
+   "lat": -24.543,
+   "lon": -60.83291,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Las Lomitas",
+   "departamento": "Patiño",
+   "lat": -24.70814,
+   "lon": -60.59138,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Posta Cambio Zalazar",
+   "departamento": "Patiño",
+   "lat": -24.21079,
+   "lon": -60.19726,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Pozo del Tigre",
+   "departamento": "Patiño",
+   "lat": -24.89555,
+   "lon": -60.31918,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "San Martín I",
+   "departamento": "Patiño",
+   "lat": -24.53247,
+   "lon": -59.90212,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "San Martín II",
+   "departamento": "Patiño",
+   "lat": -24.43373,
+   "lon": -59.6549,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Subteniente Perín",
+   "departamento": "Patiño",
+   "lat": -25.53541,
+   "lon": -60.01882,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Villa General Güemes",
+   "departamento": "Patiño",
+   "lat": -24.75578,
+   "lon": -59.48851,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Villa General Manuel Belgrano",
+   "departamento": "Patiño",
+   "lat": -24.93853,
+   "lon": -59.02639,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Buena Vista",
+   "departamento": "Pilagás",
+   "lat": -25.0715,
+   "lon": -58.38553,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "El Espinillo",
+   "departamento": "Pilagás",
+   "lat": -24.98148,
+   "lon": -58.55256,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Laguna Gallo",
+   "departamento": "Pilagás",
+   "lat": -25.26909,
+   "lon": -58.74232,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Misión Tacaaglé",
+   "departamento": "Pilagás",
+   "lat": -24.981,
+   "lon": -58.81993,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Portón Negro",
+   "departamento": "Pilagás",
+   "lat": -24.96609,
+   "lon": -58.74255,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Tres Lagunas",
+   "departamento": "Pilagás",
+   "lat": -25.21612,
+   "lon": -58.51308,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Clorinda",
+   "departamento": "Pilcomayo",
+   "lat": -25.28608,
+   "lon": -57.72241,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Laguna Blanca",
+   "departamento": "Pilcomayo",
+   "lat": -25.12626,
+   "lon": -58.24046,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Laguna Naick-Neck",
+   "departamento": "Pilcomayo",
+   "lat": -25.22274,
+   "lon": -58.12102,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Palma Sola",
+   "departamento": "Pilcomayo",
+   "lat": -25.24797,
+   "lon": -57.97627,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Puerto Pilcomayo",
+   "departamento": "Pilcomayo",
+   "lat": -25.37222,
+   "lon": -57.65161,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Riacho He-He",
+   "departamento": "Pilcomayo",
+   "lat": -25.36066,
+   "lon": -58.2798,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Riacho Negro",
+   "departamento": "Pilcomayo",
+   "lat": -25.42397,
+   "lon": -57.79328,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Siete Palmas",
+   "departamento": "Pilcomayo",
+   "lat": -25.20369,
+   "lon": -58.332,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Colonia Campo Villafañe",
+   "departamento": "Pirané",
+   "lat": -26.20469,
+   "lon": -59.08003,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "El Colorado",
+   "departamento": "Pirané",
+   "lat": -26.30906,
+   "lon": -59.37231,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Palo Santo",
+   "departamento": "Pirané",
+   "lat": -25.56459,
+   "lon": -59.33772,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Pirané",
+   "departamento": "Pirané",
+   "lat": -25.73265,
+   "lon": -59.10981,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "Villa Kilómetro 213",
+   "departamento": "Pirané",
+   "lat": -26.18717,
+   "lon": -59.36716,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "El Potrillo",
+   "departamento": "Ramón Lista",
+   "lat": -23.16244,
+   "lon": -62.00896,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "El Quebracho",
+   "departamento": "Ramón Lista",
+   "lat": -23.34252,
+   "lon": -61.87158,
+   "categoria": "Localidad simple"
+  },
+  {
+   "nombre": "General Mosconi",
+   "departamento": "Ramón Lista",
+   "lat": -23.18383,
+   "lon": -62.30657,
+   "categoria": "Localidad simple"
+  }
+ ]
+}

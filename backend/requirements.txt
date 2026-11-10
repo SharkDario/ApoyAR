@@ -11,6 +11,7 @@ pyasn1>=0.6.0
 pyasn1-modules>=0.4.0
 pyjwt[crypto]>=2.9.0
 reportlab>=4.0.0
+openpyxl>=3.1,<4
 numpy>=1.26.0
 onnxruntime>=1.18.0
 vosk==0.3.45

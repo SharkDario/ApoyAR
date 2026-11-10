@@ -7,8 +7,8 @@
 // sus permisos no se cambian.
 // ─────────────────────────────────────────────────────────────────────────────
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
-import { Check, Lock, Pencil, Plus, Trash2, X } from 'lucide-react';
+import { ActivityIndicator, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { Check, Lock, Pencil, Plus, Trash2, X, ArrowUp } from 'lucide-react';
 import { palette, radii, spacing } from '../theme/tokens';
 
 export interface PermisoCatalogo {
@@ -63,6 +63,22 @@ export function PerfilesPanel({ apiBaseUrl, token, colors, onToast, onCambio }: 
   const [descripcion, setDescripcion] = useState('');
   const [seleccion, setSeleccion] = useState<string[]>([]);
 
+  const scrollRef = useRef<any>(null);
+  const nombreInputRef = useRef<any>(null);
+
+  const scrollHaciaArriba = () => {
+    setTimeout(() => {
+      scrollRef.current?.scrollTo({ y: 0, animated: true });
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        const node = (scrollRef.current as any)?.getScrollableNode?.() || (scrollRef.current as any);
+        if (node?.scrollTo) {
+          node.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+      }
+      nombreInputRef.current?.focus();
+    }, 60);
+  };
+
   const cabeceras = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
 
   // El panel principal se vuelve a dibujar seguido (incidentes cada 30 s y en tiempo real).
@@ -108,6 +124,7 @@ export function PerfilesPanel({ apiBaseUrl, token, colors, onToast, onCambio }: 
     setDescripcion('');
     setSeleccion([]);
     setMostrarForm(true);
+    scrollHaciaArriba();
   };
 
   const abrirEdicion = (perfil: PerfilItem) => {
@@ -116,6 +133,7 @@ export function PerfilesPanel({ apiBaseUrl, token, colors, onToast, onCambio }: 
     setDescripcion(perfil.descripcion || '');
     setSeleccion(perfil.permisos);
     setMostrarForm(true);
+    scrollHaciaArriba();
   };
 
   const alternarPermiso = (clave: string) => {
@@ -203,7 +221,7 @@ export function PerfilesPanel({ apiBaseUrl, token, colors, onToast, onCambio }: 
   }, {});
 
   return (
-    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: spacing.lg, gap: spacing.md }}>
+    <ScrollView ref={scrollRef} style={{ flex: 1 }} contentContainerStyle={{ padding: spacing.lg, gap: spacing.md }}>
       <View style={estilos.fila}>
         <Text style={[estilos.ayuda, { color: colors.text.secondary, flex: 1 }]}>
           Los perfiles personalizados dan acceso al panel con los permisos que elijas. Se asignan al dar de alta o editar un
@@ -218,11 +236,24 @@ export function PerfilesPanel({ apiBaseUrl, token, colors, onToast, onCambio }: 
       </View>
 
       {mostrarForm && (
-        <View style={[estilos.tarjeta, { backgroundColor: colors.bg.elevated, borderColor: colors.semantic.info }]}>
-          <Text style={[estilos.titulo, { color: colors.text.primary }]}>
-            {editandoId ? 'Editar perfil' : 'Nuevo perfil'}
-          </Text>
+        <View style={[estilos.tarjeta, { backgroundColor: colors.bg.elevated, borderColor: colors.semantic.info, borderWidth: 1.5 }]}>
+          <View style={[estilos.fila, { justifyContent: 'space-between', marginBottom: spacing.xs }]}>
+            <View style={[estilos.fila, { gap: 8 }]}>
+              {editandoId ? <Pencil size={18} color={colors.semantic.info} /> : <Plus size={18} color={colors.semantic.info} />}
+              <Text style={[estilos.titulo, { color: colors.text.primary }]}>
+                {editandoId ? `Editar perfil: ${nombre || 'personalizado'}` : 'Nuevo perfil personalizado'}
+              </Text>
+            </View>
+            {editandoId && (
+              <View style={{ backgroundColor: colors.semantic.infoBg, paddingHorizontal: 8, paddingVertical: 3, borderRadius: radii.full, borderWidth: 1, borderColor: colors.semantic.info }}>
+                <Text style={{ fontSize: 11, fontWeight: '700', color: colors.semantic.info }}>
+                  Editando
+                </Text>
+              </View>
+            )}
+          </View>
           <TextInput
+            ref={nombreInputRef}
             value={nombre}
             onChangeText={setNombre}
             placeholder="Nombre (ej.: Supervisión de guardia)"
@@ -260,6 +291,12 @@ export function PerfilesPanel({ apiBaseUrl, token, colors, onToast, onCambio }: 
               })}
             </View>
           ))}
+          {seleccion.includes('incidente.estadisticas') && !seleccion.includes('incidente.monitorear') && (
+            <Text style={[estilos.ayuda, { color: colors.text.secondary, marginTop: spacing.sm }]}>
+              Con estadísticas y sin monitoreo, este perfil entra al panel directo a la sección Estadísticas: ve totales
+              anónimos y el mapa de calor, pero no los casos, la ubicación en vivo ni las pruebas.
+            </Text>
+          )}
           <View style={[estilos.fila, { marginTop: spacing.md, justifyContent: 'flex-end' }]}>
             <TouchableOpacity style={[estilos.boton, { backgroundColor: colors.bg.overlay }]} onPress={() => setMostrarForm(false)}>
               <X size={15} color={colors.text.primary} style={{ marginRight: 6 }} />
@@ -330,6 +367,16 @@ export function PerfilesPanel({ apiBaseUrl, token, colors, onToast, onCambio }: 
           </View>
         </View>
       ))}
+
+      {mostrarForm && (
+        <TouchableOpacity
+          style={[estilos.boton, { backgroundColor: colors.semantic.info, alignSelf: 'center', marginTop: spacing.md }]}
+          onPress={scrollHaciaArriba}
+        >
+          <ArrowUp size={15} color="#FFFFFF" style={{ marginRight: 6 }} />
+          <Text style={estilos.botonTexto}>Subir al formulario de edición ↑</Text>
+        </TouchableOpacity>
+      )}
     </ScrollView>
   );
 }

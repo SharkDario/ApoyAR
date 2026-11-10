@@ -40,6 +40,10 @@ class RecursoNoEncontradoError(AppError):
     status_code = 404
 
 
+class ConflictoError(AppError):
+    status_code = 409
+
+
 class ContenidoNoProcesableError(AppError):
     status_code = 422
 

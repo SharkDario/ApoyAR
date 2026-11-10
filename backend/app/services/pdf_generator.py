@@ -454,3 +454,52 @@ def generar_informe_tecnico_pdf(
     pdf_bytes = buffer.getvalue()
     buffer.close()
     return pdf_bytes
+
+
+def generar_pdf_estadisticas(generado_en: str, secciones: List[Any]) -> bytes:
+    """
+    Resumen estadístico anónimo de las emergencias (RF-4.4) en PDF.
+    `secciones` es una lista de (título, encabezados, filas) con totales: no
+    lleva nombres, documentos, direcciones exactas ni evidencias.
+    """
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=letter, title="Estadísticas ApoyAR",
+        leftMargin=0.6 * inch, rightMargin=0.6 * inch, topMargin=0.6 * inch, bottomMargin=0.6 * inch,
+    )
+    estilos = getSampleStyleSheet()
+    titulo = ParagraphStyle("TituloEst", parent=estilos["Title"], fontSize=16, leading=20, spaceAfter=4)
+    nota = ParagraphStyle("NotaEst", parent=estilos["Normal"], fontSize=8.5, leading=11, textColor=colors.HexColor("#475569"))
+    seccion = ParagraphStyle("SeccionEst", parent=estilos["Heading3"], fontSize=11, leading=14, spaceBefore=10, spaceAfter=4)
+    celda = ParagraphStyle("CeldaEst", parent=estilos["Normal"], fontSize=8.5, leading=10.5)
+    encabezado = ParagraphStyle("EncabezadoEst", parent=celda, textColor=colors.white, fontName="Helvetica-Bold")
+
+    story: List[Any] = [
+        Paragraph("ApoyAR · Estadísticas de emergencias (Modo Resguardo)", titulo),
+        Paragraph(
+            f"Generado el {formatear_fecha_pericial(generado_en)}. Solo contiene totales: no incluye nombres, documentos, "
+            "teléfonos, direcciones exactas ni evidencias (Ley N.° 25.326).", nota),
+        Spacer(1, 6),
+    ]
+    ancho_total = 7.3 * inch
+    for titulo_seccion, encabezados, filas in secciones:
+        if not filas:
+            continue
+        datos = [[Paragraph(str(e), encabezado) for e in encabezados]]
+        datos += [[Paragraph(str(c), celda) for c in fila] for fila in filas]
+        primera = ancho_total * (0.4 if len(encabezados) > 2 else 0.6)
+        resto = (ancho_total - primera) / max(1, len(encabezados) - 1)
+        tabla = Table(datos, colWidths=[primera] + [resto] * (len(encabezados) - 1), repeatRows=1)
+        tabla.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1E3A8A")),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F1F5F9")]),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#CBD5E1")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("PADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(KeepTogether([Paragraph(titulo_seccion, seccion), tabla]) if len(filas) <= 14 else Paragraph(titulo_seccion, seccion))
+        if len(filas) > 14:
+            story.append(tabla)
+
+    doc.build(story)
+    return buffer.getvalue()

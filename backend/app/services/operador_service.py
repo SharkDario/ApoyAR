@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from app.errors import ErrorInternoError, RecursoNoEncontradoError, SolicitudInvalidaError
+from app.errors import ConflictoError, ErrorInternoError, RecursoNoEncontradoError, SolicitudInvalidaError
 from app.repositories.auth_gateway import SupabaseAuthGateway
 from app.repositories.cargo_institucional_repository import CargoInstitucionalRepository
 from app.repositories.perfil_repository import PerfilRepository
@@ -288,10 +288,102 @@ class OperadorService:
 
     # ── Alta de operador ─────────────────────────────────────────────────────
 
+    def validar_unicidad_operador(
+        self,
+        email: Optional[str] = None,
+        dni: Optional[str] = None,
+        telefono: Optional[str] = None,
+        legajo: Optional[str] = None,
+        usuario_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Valida que el correo electrónico institucional, DNI, teléfono y legajo/matrícula no existan previamente.
+        Si se pasa `usuario_id`, permite que los datos coincidan con ese mismo usuario (caso vinculación o edición).
+        """
+        errores: Dict[str, str] = {}
+
+        # 1. Validación de Correo Electrónico Institucional
+        if email and email.strip():
+            email_limpio = email.strip().lower()
+            try:
+                usuario_existente = self._usuarios.buscar_usuario_por_email(email_limpio)
+                if usuario_existente:
+                    u_id = usuario_existente.get("usu_id_usuario")
+                    if not usuario_id or (u_id and str(u_id) != str(usuario_id)):
+                        errores["email"] = "El correo electrónico institucional ya se encuentra registrado."
+            except Exception as e_err:
+                logger.warning("Aviso validando unicidad de email en tabla usuario: %s", e_err)
+
+            if "email" not in errores:
+                auth_uid = self._buscar_auth_user_id_por_email(email_limpio)
+                if auth_uid and (not usuario_id or str(auth_uid) != str(usuario_id)):
+                    errores["email"] = "El correo electrónico institucional ya se encuentra registrado."
+
+        # 2. Validación de DNI
+        if dni and dni.strip():
+            dni_limpio = dni.strip().replace(".", "").replace(" ", "")
+            if len(dni_limpio) >= 6:
+                try:
+                    personas_dni = self._usuarios.buscar_personas_por_dni(dni_limpio)
+                    for p in personas_dni:
+                        pid = p.get("per_id_persona")
+                        u_rel = _primer_usuario(p.get("usuario"))
+                        p_uid = u_rel.get("usu_id_usuario")
+                        if not p_uid and pid:
+                            u_obj = self._usuarios.buscar_usuario_por_persona_id(pid)
+                            if u_obj:
+                                p_uid = u_obj.get("usu_id_usuario")
+                        if not usuario_id or (p_uid and str(p_uid) != str(usuario_id)):
+                            errores["dni"] = "El DNI ingresado ya se encuentra registrado."
+                            break
+                except Exception as d_err:
+                    logger.warning("Aviso validando unicidad de DNI: %s", d_err)
+
+        # 3. Validación de Teléfono
+        if telefono and telefono.strip():
+            tel_limpio = telefono.strip()
+            tel_digitos = "".join(c for c in tel_limpio if c.isdigit())
+            if len(tel_digitos) >= 6:
+                try:
+                    personas_tel = self._usuarios.buscar_personas_por_telefono(tel_limpio)
+                    if not personas_tel and tel_digitos != tel_limpio:
+                        personas_tel = self._usuarios.buscar_personas_por_telefono(tel_digitos)
+                    for p in personas_tel:
+                        pid = p.get("per_id_persona")
+                        u_rel = _primer_usuario(p.get("usuario"))
+                        p_uid = u_rel.get("usu_id_usuario")
+                        if not p_uid and pid:
+                            u_obj = self._usuarios.buscar_usuario_por_persona_id(pid)
+                            if u_obj:
+                                p_uid = u_obj.get("usu_id_usuario")
+                        if not usuario_id or (p_uid and str(p_uid) != str(usuario_id)):
+                            errores["telefono"] = "El número de teléfono ya se encuentra registrado."
+                            break
+                except Exception as t_err:
+                    logger.warning("Aviso validando unicidad de teléfono: %s", t_err)
+
+        # 4. Validación de Legajo / Matrícula Personal (Único)
+        if legajo and legajo.strip():
+            legajo_limpio = legajo.strip()
+            try:
+                cargo_existente = self._cargos.buscar_por_legajo(legajo_limpio)
+                if cargo_existente:
+                    c_uid = cargo_existente.get("usu_id_usuario")
+                    if not usuario_id or (c_uid and str(c_uid) != str(usuario_id)):
+                        errores["legajo"] = "El número de legajo o matrícula ya se encuentra registrado."
+            except Exception as l_err:
+                logger.warning("Aviso validando unicidad de legajo: %s", l_err)
+
+        return {
+            "disponible": len(errores) == 0,
+            "errores": errores,
+        }
+
     def crear_operador(self, solicitud: CrearOperadorRequest, admin: Dict[str, Any]) -> Dict[str, Any]:
         """
         Registra desde cero o vincula un usuario civil existente, asigna los
         roles institucionales y, para Autoridad, su adscripción en `cargo_institucional`.
+        Aplica validación estricta de unicidad en Correo Institucional, DNI y Teléfono.
         """
         roles_a_asignar = solicitud.roles or ([solicitud.rol] if solicitud.rol else [ROL_AUTORIDAD])
         asignables = self._perfiles_asignables()
@@ -309,8 +401,27 @@ class OperadorService:
         user_id: Optional[str] = solicitud.usuario_id_existente
         now_iso = _ahora_iso()
 
+        legajo = (solicitud.legajo_o_matricula or solicitud.legajo_personal or "").strip()
+        if ROL_AUTORIDAD in roles_a_asignar:
+            if not solicitud.id_sede:
+                raise SolicitudInvalidaError("Para el perfil Autoridad se debe seleccionar una Sede física válida.")
+            if not legajo:
+                raise SolicitudInvalidaError("El legajo o matrícula profesional es obligatorio para el perfil Autoridad y debe ser único.")
+
+        # Validación estricta de unicidad: Correo Institucional, DNI, Teléfono y Legajo no pueden existir previamente
+        unicidad = self.validar_unicidad_operador(
+            email=email,
+            dni=dni_limpio,
+            telefono=solicitud.telefono,
+            legajo=legajo if (ROL_AUTORIDAD in roles_a_asignar or legajo) else None,
+            usuario_id=user_id,
+        )
+        if not unicidad["disponible"]:
+            primer_error = next(iter(unicidad["errores"].values()))
+            raise ConflictoError(primer_error)
+
         if not user_id:
-            user_id = self._usuario_por_dni(dni_limpio) or self._crear_o_reutilizar_cuenta_auth(solicitud, email, dni_limpio, roles_a_asignar)
+            user_id = self._crear_cuenta_auth(solicitud, email, dni_limpio, roles_a_asignar)
 
         usuario_payload: Dict[str, Any] = {"usu_id_usuario": user_id, "usu_email": email, "usu_activo": True}
         if not solicitud.usuario_id_existente:
@@ -348,11 +459,6 @@ class OperadorService:
                 logger.warning("Aviso limpiando perfil civil auto-asignado en alta de operador: %s", rm_err)
 
         if ROL_AUTORIDAD in roles_a_asignar:
-            if not solicitud.id_sede:
-                raise SolicitudInvalidaError("Para el perfil Autoridad se debe seleccionar una Sede física válida.")
-            legajo = (solicitud.legajo_o_matricula or solicitud.legajo_personal or "").strip()
-            if not legajo:
-                raise SolicitudInvalidaError("El legajo o matrícula profesional es obligatorio para el perfil Autoridad y debe ser único.")
             try:
                 self._cargos.upsert({
                     "usu_id_usuario": user_id,
@@ -373,17 +479,16 @@ class OperadorService:
             "estado_aprobacion": "activo",
         }
 
-    def _usuario_por_dni(self, dni: str) -> Optional[str]:
-        """Unicidad de DNI: reutiliza el usuario de una persona ya registrada."""
+    def _buscar_auth_user_id_por_email(self, email: str) -> Optional[str]:
         try:
-            personas = self._usuarios.buscar_personas_por_dni(dni)
-            if personas:
-                return _primer_usuario(personas[0].get("usuario")).get("usu_id_usuario")
-        except Exception:
-            pass
+            for u in self._auth.listar_usuarios():
+                if getattr(u, "email", "").strip().lower() == email.strip().lower():
+                    return str(getattr(u, "id"))
+        except Exception as exc:
+            logger.warning("Aviso listando usuarios de Auth para verificar email: %s", exc)
         return None
 
-    def _crear_o_reutilizar_cuenta_auth(self, solicitud: CrearOperadorRequest, email: str, dni: str, roles: List[str]) -> str:
+    def _crear_cuenta_auth(self, solicitud: CrearOperadorRequest, email: str, dni: str, roles: List[str]) -> str:
         try:
             return self._auth.crear_usuario({
                 "email": email,
@@ -402,13 +507,9 @@ class OperadorService:
                 },
             })
         except Exception as exc:
-            # Si el email ya existía en Auth, se reutiliza esa cuenta
-            try:
-                for u in self._auth.listar_usuarios():
-                    if getattr(u, "email", "").lower() == email:
-                        return str(getattr(u, "id"))
-            except Exception:
-                pass
+            msg = str(exc).lower()
+            if "already registered" in msg or "already exists" in msg or "duplicate" in msg or "unique" in msg:
+                raise ConflictoError("El correo electrónico institucional ya se encuentra registrado.")
             raise SolicitudInvalidaError(f"No se pudo crear la cuenta del operador: {exc}")
 
     def _registrar_persona(self, user_id: str, solicitud: CrearOperadorRequest, dni: str, now_iso: str) -> None:
@@ -627,7 +728,11 @@ class OperadorService:
             if sede_id is not None:
                 datos_cargo["sed_id_sede"] = sede_id
             if legajo is not None:
-                datos_cargo["carins_legajo_o_matricula"] = legajo.strip()
+                legajo_limpio = legajo.strip()
+                unicidad = self.validar_unicidad_operador(legajo=legajo_limpio, usuario_id=user_uuid)
+                if not unicidad["disponible"]:
+                    raise ConflictoError(unicidad["errores"]["legajo"])
+                datos_cargo["carins_legajo_o_matricula"] = legajo_limpio
             if solicitud.nombre_cargo:
                 datos_cargo["car_nombre_cargo"] = solicitud.nombre_cargo.strip()
 

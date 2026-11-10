@@ -320,6 +320,30 @@ def test_flujo_login_movil(fake_env):
         fake_env.auth_service.login_movil(email, pwd)
 
 
+# ── 10b. Operador del panel que entra a la app: recibe el perfil Civil ───────
+def test_login_movil_asigna_perfil_civil_a_operador(fake_env):
+    email = "autoridad@policia.gob.ar"
+    pwd = "Operador123!"
+    uid = fake_env.db.next_id("auth")
+    fake_env.db.auth_users.append({"id": uid, "email": email, "password": pwd})
+    fake_env.db.tables["perfil"] = [
+        {"prf_id_perfil": "p-civil", "prf_nombre": "Civil"},
+        {"prf_id_perfil": "p-autoridad", "prf_nombre": "Autoridad"},
+    ]
+    fake_env.db.tables["usuario_tiene_perfil"] = [
+        {"usu_id_usuario": uid, "prf_id_perfil": "p-autoridad", "usuprf_estado_aprobacion": "activo"},
+    ]
+
+    fake_env.auth_service.login_movil(email, pwd)
+    fake_env.auth_service.login_movil(email, pwd)  # un segundo ingreso no la duplica
+
+    civiles = [a for a in fake_env.db.tables["usuario_tiene_perfil"] if a["prf_id_perfil"] == "p-civil"]
+    assert len(civiles) == 1
+    assert civiles[0]["usu_id_usuario"] == uid and civiles[0]["usuprf_estado_aprobacion"] == "activo"
+    # El perfil de Autoridad sigue igual
+    assert any(a["prf_id_perfil"] == "p-autoridad" for a in fake_env.db.tables["usuario_tiene_perfil"])
+
+
 # ── 11. Endpoint HTTP en FastAPI con TestClient ──────────────────────────────
 def test_endpoints_api_bloqueo(fake_env):
     # Override dependencies

@@ -158,9 +158,19 @@ class IncidenteService:
 
         if usuario:
             self._acceso.verificar_acceso_incidente(incidente_id, usuario, accion="update_estado")
-        actual = self._incidentes.obtener_por_id(incidente_id, "inc_id_incidente, inc_notas")
+        actual = self._incidentes.obtener_por_id(incidente_id, "inc_id_incidente, inc_notas, usu_id_victima")
         if not actual:
             raise RecursoNoEncontradoError(f"Incidente {incidente_id} no encontrado.")
+
+        # La víctima abre y cierra su emergencia. Un operador puede cerrarla con motivo
+        # (teléfono perdido, falso positivo, atención finalizada), pero nunca reabrirla.
+        # Sin usuario el pedido llega desde la cola de la app con X-Api-Secret.
+        es_victima = not usuario or str(actual.get("usu_id_victima")) == str(usuario["id"])
+        if not es_victima:
+            if solicitud.estado == "en_curso":
+                raise AccesoDenegadoError("Un operador no puede reabrir una emergencia: solo la víctima la inicia desde la aplicación.")
+            if not solicitud.notas or len(solicitud.notas.strip()) < 10:
+                raise SolicitudInvalidaError("Para cerrar una emergencia se debe indicar el motivo, con al menos 10 caracteres.")
 
         # Las notas se agregan: reemplazarlas borraría las relaciones y asociaciones registradas
         campos = {"inc_estado": solicitud.estado}

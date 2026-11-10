@@ -95,6 +95,32 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(resp.json()["cargos"]), 10)
 
+    async def test_validar_unicidad_operador_endpoint(self):
+        servicio = MagicMock()
+        servicio.validar_unicidad_operador.return_value = {
+            "disponible": False,
+            "errores": {
+                "email": "El correo electrónico institucional ya se encuentra registrado.",
+                "legajo": "El número de legajo o matrícula ya se encuentra registrado.",
+            },
+        }
+        app.dependency_overrides[dependencies.get_operador_service] = lambda: servicio
+        self.db.tables["perfil"] = [{"prf_id_perfil": "p-admin", "prf_nombre": "Administrador"}]
+        self.db.tables["usuario_tiene_perfil"] = [{
+            "usu_id_usuario": USUARIO, "prf_id_perfil": "p-admin", "usuprf_estado_aprobacion": "activo",
+            "perfil": {"prf_nombre": "Administrador"},
+        }]
+
+        resp = await self.solicitar(
+            "GET",
+            "/api/v1/admin/usuarios/validar-unicidad?email=duplicado@policia.gob.ar&legajo=LP-POL-9999",
+            headers={"Authorization": f"Bearer {token()}"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["disponible"], False)
+        self.assertIn("email", resp.json()["errores"])
+        self.assertIn("legajo", resp.json()["errores"])
+
 
 class ComposicionTest(unittest.TestCase):
 

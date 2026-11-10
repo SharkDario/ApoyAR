@@ -40,6 +40,7 @@ import {
   ChevronRight,
   ChevronLeft,
   ChevronDown,
+  ChevronUp,
   X,
   Lock,
   Layers,
@@ -69,10 +70,26 @@ import {
   Compass,
   Sliders,
   Link2,
+  ArrowLeft,
+  Smartphone,
+  Navigation,
+  BarChart3,
 } from 'lucide-react';
 import { supabase } from './src/lib/supabase';
+import {
+  getMfaStatusAsync,
+  challengeAndVerifyMfaAsync,
+  enrollTotpAsync,
+  confirmEnrollmentAsync,
+  disableAllMfaAsync,
+  cleanupUnverifiedFactorsAsync,
+  unenrollTotpAsync,
+  type MfaStatus,
+  type TotpEnrollmentResult,
+} from './src/services/mfaService';
 import { MapViewComponent, type IncidentMarker } from './src/components/MapViewComponent';
 import { PerfilesPanel } from './src/components/PerfilesPanel';
+import { EstadisticasPanel } from './src/components/EstadisticasPanel';
 import { palette, spacing, radii } from './src/theme/tokens';
 import {
   validateDni,
@@ -92,7 +109,7 @@ const LOGO_SOURCE = require('./assets/logo.png');
 
 export interface IncidenteItem {
   id: string;
-  victima_id: string;
+  victima_id: string | null; // null: la persona eliminó su cuenta y el incidente quedó anonimizado
   victima_nombre?: string;
   direccion?: string;
   direccion_aprox?: string;
@@ -102,6 +119,7 @@ export interface IncidenteItem {
   estado: 'en_curso' | 'cerrado' | string;
   notas?: string;
   fecha_hora: string;
+  fecha_fin?: string | null;
   last_location_at?: string;
   consentimiento_exportacion?: boolean;
   fecha_consentimiento?: string | null;
@@ -188,6 +206,58 @@ export const extraerRelaciones = (notas?: string | null): RelacionIncidente[] =>
     .filter((r): r is RegExpExecArray => r !== null)
     .map(([, fecha, incidenteId, motivo, operador]) => ({ incidenteId, fecha, motivo, operador }));
 
+// "Reabrir Caso" no vuelve la emergencia a "En curso": abre una revisión del caso cerrado.
+// Cada acción queda como una nota con formato y de ellas se deduce si el caso está en revisión.
+export type AccionRevision = 'reabrir' | 'seguimiento' | 'cerrar_revision';
+
+const ETIQUETAS_REVISION: Record<AccionRevision, string> = {
+  reabrir: 'Caso reabierto',
+  seguimiento: 'Seguimiento',
+  cerrar_revision: 'Revisión cerrada',
+};
+
+const PATRON_REVISION = /^\[(Caso reabierto|Seguimiento|Revisión cerrada) ([^\]]+)\] Por (.+?)\. (?:Motivo|Nota): (.*)$/;
+
+export interface EntradaRevision {
+  tipo: string;
+  fecha: string;
+  operador: string;
+  texto: string;
+}
+
+export const notasDeIncidente = (incidente: IncidenteItem): string | undefined => (incidente as any).inc_notas ?? incidente.notas;
+
+export const extraerRevision = (notas?: string | null): EntradaRevision[] =>
+  (notas || '')
+    .split('\n')
+    .map((linea) => PATRON_REVISION.exec(linea.trim()))
+    .filter((r): r is RegExpExecArray => r !== null)
+    .map(([, tipo, fecha, operador, texto]) => ({ tipo, fecha, operador, texto }));
+
+export const estaEnRevision = (notas?: string | null): boolean => {
+  const cambios = extraerRevision(notas).filter((entrada) => entrada.tipo !== 'Seguimiento');
+  return cambios.length > 0 && cambios[cambios.length - 1].tipo === 'Caso reabierto';
+};
+
+export const notaRevision = (accion: AccionRevision, operador: string, texto: string): string =>
+  `[${ETIQUETAS_REVISION[accion]} ${new Date().toISOString()}] Por ${operador}. ${accion === 'seguimiento' ? 'Nota' : 'Motivo'}: ${texto.replace(/\s+/g, ' ').trim()}`;
+
+// Opciones del filtro por estado en la pestaña "Todos"; "Cerrado" excluye los casos en revisión
+const ESTADOS_FILTRO_TODOS = [
+  { valor: 'todos', etiqueta: 'Todos los estados' },
+  { valor: 'en_curso', etiqueta: 'En curso' },
+  { valor: 'cerrado', etiqueta: 'Cerrado' },
+  { valor: 'en_revision', etiqueta: 'En revisión' },
+] as const;
+
+// Un operador puede cerrar una emergencia ajena, siempre con motivo; nunca reabrirla
+const MOTIVOS_CIERRE = [
+  { valor: 'atendida', etiqueta: 'Atendida por la autoridad' },
+  { valor: 'falso_positivo', etiqueta: 'Falso positivo' },
+  { valor: 'sin_respuesta', etiqueta: 'Sin respuesta de la víctima' },
+  { valor: 'otro', etiqueta: 'Otro motivo' },
+];
+
 export const formatTipoArchivo = (tipoArchivo?: string | null): string => {
   const tipo = String(tipoArchivo || 'archivo');
   return tipo.charAt(0).toUpperCase() + tipo.slice(1);
@@ -205,14 +275,14 @@ export const mergeIncidente = (oldInc: IncidenteItem, rawNew: any): IncidenteIte
     rawNew.inc_consentimiento_exportacion !== undefined
       ? Boolean(rawNew.inc_consentimiento_exportacion)
       : (rawNew.consentimiento_exportacion !== undefined
-      ? Boolean(rawNew.consentimiento_exportacion)
-      : oldInc.consentimiento_exportacion);
+        ? Boolean(rawNew.consentimiento_exportacion)
+        : oldInc.consentimiento_exportacion);
   const newFechaConsent =
     rawNew.inc_fecha_consentimiento !== undefined
       ? rawNew.inc_fecha_consentimiento
       : (rawNew.fecha_consentimiento !== undefined
-      ? rawNew.fecha_consentimiento
-      : oldInc.fecha_consentimiento);
+        ? rawNew.fecha_consentimiento
+        : oldInc.fecha_consentimiento);
 
   return {
     ...oldInc,
@@ -223,8 +293,8 @@ export const mergeIncidente = (oldInc: IncidenteItem, rawNew: any): IncidenteIte
       rawNew.inc_victima_nombre && typeof rawNew.inc_victima_nombre === 'string' && rawNew.inc_victima_nombre.trim() !== ''
         ? rawNew.inc_victima_nombre
         : (rawNew.victima_nombre && typeof rawNew.victima_nombre === 'string' && rawNew.victima_nombre.trim() !== ''
-        ? rawNew.victima_nombre
-        : oldInc.victima_nombre),
+          ? rawNew.victima_nombre
+          : oldInc.victima_nombre),
     direccion:
       newDir && typeof newDir === 'string' && newDir.trim() !== ''
         ? newDir
@@ -275,6 +345,10 @@ export default function App() {
   // Permisos del usuario (tablas permiso y perfil_tiene_permiso): deciden qué secciones se muestran
   const [permisos, setPermisos] = useState<string[]>([]);
   const puede = useCallback((permiso: string) => permisos.includes(permiso), [permisos]);
+  // Estadísticas anónimas (RF-4.4): un perfil que solo tiene ese permiso ve únicamente esta sección
+  const [vistaEstadisticas, setVistaEstadisticas] = useState(false);
+  const soloEstadisticas = permisos.includes('incidente.estadisticas') && !permisos.includes('incidente.monitorear');
+  const mostrarEstadisticas = soloEstadisticas || (vistaEstadisticas && permisos.includes('incidente.estadisticas'));
 
   // Estados de Visibilidad de Contraseñas ("Ojito")
   const [showLoginPassword, setShowLoginPassword] = useState(false);
@@ -285,6 +359,67 @@ export default function App() {
   // Estados de Bloqueo Temporal por Intentos Fallidos
   const [lockoutActive, setLockoutActive] = useState(false);
   const [lockoutRemainingSeconds, setLockoutRemainingSeconds] = useState(0);
+
+  // Estados de Verificación en Dos Pasos (2FA TOTP / Google Authenticator)
+  const [mfaStep, setMfaStep] = useState(false);
+  const [mfaFactorId, setMfaFactorId] = useState<string | null>(null);
+  const [mfaCode, setMfaCode] = useState('');
+  const [mfaLoading, setMfaLoading] = useState(false);
+  const [mfaError, setMfaError] = useState<string | null>(null);
+  const [pendingSession, setPendingSession] = useState<any>(null);
+  const [pendingUserRole, setPendingUserRole] = useState<string>('Operador');
+
+  // Estados de Modal de Perfil del Operador y Configuración 2FA
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [profileMfaStatus, setProfileMfaStatus] = useState<MfaStatus | null>(null);
+  const [profileMfaLoading, setProfileMfaLoading] = useState(false);
+  const [profileMfaEnrolling, setProfileMfaEnrolling] = useState(false);
+  const [profileMfaEnrollData, setProfileMfaEnrollData] = useState<TotpEnrollmentResult | null>(null);
+  const [profileMfaCode, setProfileMfaCode] = useState('');
+  const [profileMfaError, setProfileMfaError] = useState<string | null>(null);
+  const [profileMfaSuccess, setProfileMfaSuccess] = useState<string | null>(null);
+  const [profileConfirmingDisable, setProfileConfirmingDisable] = useState(false);
+  const [profileUserData, setProfileUserData] = useState<any>(null);
+
+  // Procesamiento robusto del QR de Supabase para renderizado vectorial en Web
+  const renderedQrCode = useMemo(() => {
+    if (!profileMfaEnrollData?.qrCodeSvg) return null;
+    let svg = profileMfaEnrollData.qrCodeSvg.trim();
+    // Supabase GoTrue devuelve "data:image/svg+xml;utf-8,<svg ...>"
+    if (svg.startsWith('data:image/svg+xml')) {
+      const commaIdx = svg.indexOf(',');
+      if (commaIdx !== -1) {
+        const payload = svg.slice(commaIdx + 1);
+        try {
+          svg = decodeURIComponent(payload);
+        } catch {
+          svg = payload;
+        }
+      }
+    }
+    if (!svg.includes('<svg')) return null;
+
+    // Asegurar dimensiones y escalado limpio en el elemento SVG
+    if (!svg.includes('width=')) {
+      svg = svg.replace('<svg', '<svg width="160" height="160" style="display:block;width:160px;height:160px;"');
+    } else {
+      svg = svg.replace(/width="[^"]*"/, 'width="160" style="display:block;width:160px;height:160px;"').replace(/height="[^"]*"/, 'height="160"');
+    }
+
+    let base64Uri: string = `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+    try {
+      if (typeof window !== 'undefined' && typeof window.btoa === 'function') {
+        base64Uri = `data:image/svg+xml;base64,${window.btoa(unescape(encodeURIComponent(svg)))}`;
+      }
+    } catch (bErr) {
+      console.warn('[MFA] Error convirtiendo QR a base64:', bErr);
+    }
+
+    return {
+      svgMarkup: svg,
+      base64Uri,
+    };
+  }, [profileMfaEnrollData?.qrCodeSvg]);
 
   // Temporizador interactivo de cuenta regresiva para rehabilitación automática
   useEffect(() => {
@@ -313,6 +448,8 @@ export default function App() {
   const [filtroNumero, setFiltroNumero] = useState(''); // Número / Altura
   const [mostrarFiltrosAvanzados, setMostrarFiltrosAvanzados] = useState(false);
   const [selectedIncidente, setSelectedIncidente] = useState<IncidenteItem | null>(null);
+  // Filtro por estado dentro de la pestaña "Todos" (incluye los casos en revisión)
+  const [filtroEstadoTodos, setFiltroEstadoTodos] = useState<(typeof ESTADOS_FILTRO_TODOS)[number]['valor']>('todos');
 
   const cantFiltrosAvanzadosActivos = useMemo(() => {
     let count = 0;
@@ -370,6 +507,7 @@ export default function App() {
         fresh.direccion_aprox !== selectedIncidente.direccion_aprox ||
         fresh.victima_nombre !== selectedIncidente.victima_nombre ||
         fresh.notas !== selectedIncidente.notas ||
+        fresh.fecha_fin !== selectedIncidente.fecha_fin ||
         fresh.consentimiento_exportacion !== selectedIncidente.consentimiento_exportacion ||
         fresh.fecha_consentimiento !== selectedIncidente.fecha_consentimiento
       ) {
@@ -417,7 +555,7 @@ export default function App() {
     confirmText: 'Confirmar',
     cancelText: 'Cancelar',
     type: 'warning',
-    onConfirm: () => {},
+    onConfirm: () => { },
   });
 
   const showConfirmDialog = useCallback((opts: Omit<ConfirmModalConfig, 'visible'>) => {
@@ -478,6 +616,8 @@ export default function App() {
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const [recoverySuccess, setRecoverySuccess] = useState<string | null>(null);
 
+  const apiBaseUrl = process.env.EXPO_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+
   // ── 7. Modal de Gestión de Operadores Institucionales (Sección 7.3) ────────
   const [showUsersModal, setShowUsersModal] = useState(false);
   const [usersList, setUsersList] = useState<any[]>([]);
@@ -486,7 +626,10 @@ export default function App() {
   const [adminTab, setAdminTab] = useState<'activos' | 'inactivos' | 'crear' | 'perfiles'>('activos');
   // Perfiles personalizados activos que se pueden asignar en el alta y en la edición
   const [perfilesAsignables, setPerfilesAsignables] = useState<string[]>([]);
+  const [perfilesCatalogo, setPerfilesCatalogo] = useState<any[]>([]);
+  const [desplegarPerfilesPersonalizados, setDesplegarPerfilesPersonalizados] = useState(false);
   const [editPerfilesPersonalizados, setEditPerfilesPersonalizados] = useState<string[]>([]);
+  const [desplegarEditPerfilesPersonalizados, setDesplegarEditPerfilesPersonalizados] = useState(false);
 
   // Paginación Operadores Activos e Inactivos (10 por página)
   const [operadoresPage, setOperadoresPage] = useState(1);
@@ -632,6 +775,7 @@ export default function App() {
     dni?: string;
     telefono?: string;
     fecha_nacimiento?: string;
+    legajo?: string;
   }>({});
   const [operatorTouched, setOperatorTouched] = useState<Record<string, boolean>>({});
   const operatorDebounceTimers = useRef<Record<string, any>>({});
@@ -648,13 +792,54 @@ export default function App() {
     return age >= 0 ? age : null;
   }, [nuevoFechaNac]);
 
+  // Verificación asíncrona de unicidad (correo institucional, DNI, teléfono, legajo) en backend
+  const checkUniquenessAsync = useCallback(async (field: 'email' | 'dni' | 'telefono' | 'legajo', val: string) => {
+    if (!val || !session?.access_token) return;
+    try {
+      const params = new URLSearchParams();
+      params.set(field, val);
+      if (selectedCivilUser?.id) {
+        params.set('usuario_id', selectedCivilUser.id);
+      }
+      const res = await fetch(`${apiBaseUrl}/api/v1/admin/usuarios/validar-unicidad?${params.toString()}`, {
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+        },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.errores && data.errores[field]) {
+          setOperatorErrors((prev) => ({
+            ...prev,
+            [field]: data.errores[field],
+          }));
+        } else {
+          setOperatorErrors((prev) => {
+            const next = { ...prev };
+            // Si el error previo era de duplicado, se limpia al estar disponible
+            if (next[field] && (next[field]?.includes('registrado') || next[field]?.includes('pertenece'))) {
+              delete next[field];
+            }
+            return next;
+          });
+        }
+      }
+    } catch (e) {
+      // Ignorar fallos de red en validación en vivo
+    }
+  }, [apiBaseUrl, session?.access_token, selectedCivilUser?.id]);
+
   // Función atómica de validación por campo
   const validateSingleField = useCallback((field: string, val: string) => {
     let err: string | undefined = undefined;
     switch (field) {
       case 'email': {
         const res = validateEmail(val);
-        if (!res.isValid) err = res.error;
+        if (!res.isValid) {
+          err = res.error;
+        } else if (usersList.some((u) => u.email && u.email.toLowerCase() === val.trim().toLowerCase() && u.id !== selectedCivilUser?.id)) {
+          err = 'Este correo electrónico ya pertenece a un operador registrado.';
+        }
         break;
       }
       case 'password': {
@@ -674,17 +859,42 @@ export default function App() {
       }
       case 'dni': {
         const res = validateDni(val);
-        if (!res.isValid) err = res.error;
+        if (!res.isValid) {
+          err = res.error;
+        } else {
+          const cleanDni = sanitizeDni(val);
+          if (cleanDni && usersList.some((u) => (u.dni || '').replace(/\D/g, '') === cleanDni && u.id !== selectedCivilUser?.id)) {
+            err = 'Este DNI ya pertenece a un operador registrado.';
+          }
+        }
         break;
       }
       case 'telefono': {
         const res = validateTelefono(val);
-        if (!res.isValid) err = res.error;
+        if (!res.isValid) {
+          err = res.error;
+        } else {
+          const cleanTel = sanitizeTelefono(val);
+          if (cleanTel && usersList.some((u) => (u.telefono || '').replace(/\D/g, '') === cleanTel && u.id !== selectedCivilUser?.id)) {
+            err = 'Este número de teléfono ya pertenece a un operador registrado.';
+          }
+        }
         break;
       }
       case 'fecha_nacimiento': {
         const res = validateFechaNacimiento(val, 18);
         if (!res.isValid) err = res.error;
+        break;
+      }
+      case 'legajo': {
+        const trimmed = val.trim();
+        if (!trimmed) {
+          if (selectedRolesAlta.includes('Autoridad')) {
+            err = 'El legajo o matrícula personal es obligatorio para Autoridad.';
+          }
+        } else if (usersList.some((u) => (u.legajo || '').trim().toLowerCase() === trimmed.toLowerCase() && u.id !== selectedCivilUser?.id)) {
+          err = 'Este número de legajo o matrícula ya pertenece a un operador registrado.';
+        }
         break;
       }
     }
@@ -698,7 +908,12 @@ export default function App() {
       }
       return next;
     });
-  }, []);
+
+    // Si pasó la validación de formato local, comprobar unicidad en el backend para email, dni, teléfono y legajo
+    if (!err && (field === 'email' || field === 'dni' || field === 'telefono' || field === 'legajo')) {
+      checkUniquenessAsync(field as 'email' | 'dni' | 'telefono' | 'legajo', val);
+    }
+  }, [usersList, selectedCivilUser?.id, checkUniquenessAsync, selectedRolesAlta]);
 
   // Manejador en tiempo real con sanitización inmediata y debounce de 300ms
   const handleOperatorChangeText = useCallback((field: string, text: string) => {
@@ -719,6 +934,8 @@ export default function App() {
       setNuevoApellido(text);
     } else if (field === 'fecha_nacimiento') {
       setNuevoFechaNac(text);
+    } else if (field === 'legajo') {
+      setNuevoLegajo(text);
     }
 
     setOperatorTouched((prev) => ({ ...prev, [field]: true }));
@@ -761,6 +978,10 @@ export default function App() {
       }
     }
 
+    if (operatorErrors.email || operatorErrors.dni || operatorErrors.telefono || operatorErrors.legajo) {
+      return false;
+    }
+
     if (selectedRolesAlta.includes('Autoridad')) {
       if (!selectedSedeId || !nuevoLegajo.trim()) {
         return false;
@@ -780,6 +1001,7 @@ export default function App() {
     nuevoFechaNac,
     selectedSedeId,
     nuevoLegajo,
+    operatorErrors,
   ]);
 
 
@@ -836,8 +1058,6 @@ export default function App() {
       }
     `;
   }, [isDark]);
-
-  const apiBaseUrl = process.env.EXPO_PUBLIC_API_BASE_URL || 'http://localhost:8000';
 
   // Cargar Catálogos Institucionales 3FN
   const cargarCatalogosInstitucionales = useCallback(async () => {
@@ -1012,6 +1232,40 @@ export default function App() {
             payload.legajo_personal = nuevoLegajo.trim();
           }
 
+          // Validación previa obligatoria de unicidad en servidor
+          const checkParams = new URLSearchParams();
+          checkParams.set('email', payload.email);
+          checkParams.set('dni', payload.dni);
+          if (payload.telefono) checkParams.set('telefono', payload.telefono);
+          if (payload.legajo_o_matricula) checkParams.set('legajo', payload.legajo_o_matricula);
+          if (payload.usuario_id_existente) checkParams.set('usuario_id', payload.usuario_id_existente);
+
+          try {
+            const preCheckRes = await fetch(`${apiBaseUrl}/api/v1/admin/usuarios/validar-unicidad?${checkParams.toString()}`, {
+              headers: {
+                Authorization: `Bearer ${session?.access_token}`,
+              },
+            });
+            if (preCheckRes.ok) {
+              const preCheckData = await preCheckRes.json();
+              if (!preCheckData.disponible && preCheckData.errores) {
+                setOperatorErrors((prev) => ({ ...prev, ...preCheckData.errores }));
+                setOperatorTouched((prev) => ({
+                  ...prev,
+                  email: !!preCheckData.errores.email || prev.email,
+                  dni: !!preCheckData.errores.dni || prev.dni,
+                  telefono: !!preCheckData.errores.telefono || prev.telefono,
+                  legajo: !!preCheckData.errores.legajo || prev.legajo,
+                }));
+                const primerErr = Object.values(preCheckData.errores)[0] as string;
+                showToast('Datos Ya Registrados', primerErr, 'warning');
+                return;
+              }
+            }
+          } catch (preErr) {
+            // Continúa con la creación si la verificación previa no responde
+          }
+
           const res = await fetch(`${apiBaseUrl}/api/v1/admin/usuarios`, {
             method: 'POST',
             headers: {
@@ -1022,7 +1276,22 @@ export default function App() {
           });
           const json = await res.json();
           if (!res.ok) {
-            throw new Error(json.detail || 'Error creando operador institucional');
+            const detail = json.detail || 'Error creando operador institucional';
+            const lower = detail.toLowerCase();
+            if (lower.includes('correo') || lower.includes('email')) {
+              setOperatorTouched((prev) => ({ ...prev, email: true }));
+              setOperatorErrors((prev) => ({ ...prev, email: detail }));
+            } else if (lower.includes('dni')) {
+              setOperatorTouched((prev) => ({ ...prev, dni: true }));
+              setOperatorErrors((prev) => ({ ...prev, dni: detail }));
+            } else if (lower.includes('teléfono') || lower.includes('telefono')) {
+              setOperatorTouched((prev) => ({ ...prev, telefono: true }));
+              setOperatorErrors((prev) => ({ ...prev, telefono: detail }));
+            } else if (lower.includes('legajo') || lower.includes('matrícula') || lower.includes('matricula')) {
+              setOperatorTouched((prev) => ({ ...prev, legajo: true }));
+              setOperatorErrors((prev) => ({ ...prev, legajo: detail }));
+            }
+            throw new Error(detail);
           }
           setMensajeOperador(`¡Operador registrado exitosamente con roles: ${selectedRolesAlta.join(', ')}!`);
           setNuevoEmail('');
@@ -1203,12 +1472,14 @@ export default function App() {
       });
       if (!res.ok) return;
       const json = await res.json();
+      const todos = (json.perfiles || []) as any[];
+      setPerfilesCatalogo(todos);
       setPerfilesAsignables(
-        (json.perfiles || [])
+        todos
           .filter((p: any) => !p.sistema && p.tipo === 'institucional' && p.activo)
           .map((p: any) => p.nombre)
       );
-    } catch (_) {}
+    } catch (_) { }
   }, [apiBaseUrl, session?.access_token]);
 
   useEffect(() => {
@@ -2007,6 +2278,28 @@ export default function App() {
 
   // Escuchar sesión de Supabase Auth
   useEffect(() => {
+    let isMounted = true;
+
+    const checkSessionAndMfa = async (currentSession: any) => {
+      if (!currentSession?.user) return;
+      try {
+        const mfa = await getMfaStatusAsync();
+        if (mfa.requiresElevation && mfa.verifiedFactorId) {
+          if (!isMounted) return;
+          setMfaFactorId(mfa.verifiedFactorId);
+          setMfaStep(true);
+          return;
+        }
+        if (!isMounted) return;
+        setSession((prev: any) => prev || currentSession);
+        verificarRolUsuario(currentSession.user.id, currentSession.access_token, currentSession.user.email);
+      } catch (_) {
+        if (!isMounted) return;
+        setSession((prev: any) => prev || currentSession);
+        verificarRolUsuario(currentSession.user.id, currentSession.access_token, currentSession.user.email);
+      }
+    };
+
     // 1. Restaurar sesión institucional de respaldo desde localStorage si existe
     if (typeof window !== 'undefined' && window.localStorage) {
       const savedInstSession = window.localStorage.getItem('apoyar_institutional_session');
@@ -2014,43 +2307,76 @@ export default function App() {
         try {
           const parsed = JSON.parse(savedInstSession);
           if (parsed && parsed.access_token) {
-            setSession(parsed);
             setPermisos(parsed.permisos || []);
-            // Refresca roles y permisos por si el Administrador los cambió
-            const uid = parsed.user?.id;
-            if (uid) verificarRolUsuario(uid, parsed.access_token, parsed.user?.email);
             const savedRole = window.localStorage.getItem('apoyar_user_role');
             if (savedRole) {
               setUserRole(savedRole);
             }
           }
-        } catch (_) {}
+        } catch (_) { }
       }
     }
 
     supabase.auth.getSession().then(({ data: { session: currentSession } }) => {
       if (currentSession?.user) {
-        setSession((prev: any) => prev || currentSession);
-        verificarRolUsuario(currentSession.user.id, currentSession.access_token, currentSession.user.email);
+        checkSessionAndMfa(currentSession);
+      } else {
+        // Fallback a localStorage si supabase no tiene sesión activa
+        if (typeof window !== 'undefined' && window.localStorage) {
+          const savedInstSession = window.localStorage.getItem('apoyar_institutional_session');
+          if (savedInstSession) {
+            try {
+              const parsed = JSON.parse(savedInstSession);
+              if (parsed && parsed.access_token) {
+                setSession(parsed);
+                const uid = parsed.user?.id;
+                if (uid) verificarRolUsuario(uid, parsed.access_token, parsed.user?.email);
+              }
+            } catch (_) {}
+          }
+        }
       }
     });
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, currentSession) => {
+    } = supabase.auth.onAuthStateChange((event, currentSession) => {
+      if (event === 'SIGNED_OUT') {
+        setSession(null);
+        setMfaStep(false);
+        setMfaFactorId(null);
+        return;
+      }
       if (currentSession?.user) {
-        setSession((prev: any) => prev || currentSession);
-        verificarRolUsuario(currentSession.user.id, currentSession.access_token, currentSession.user.email);
+        checkSessionAndMfa(currentSession);
       }
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      isMounted = false;
+      subscription.unsubscribe();
+    };
   }, []);
 
   // Cargar incidentes con Paginación Estricta de 10 en 10
+  // La página se lee desde una referencia: si la función dependiera de `incidentesPage`,
+  // cambiar de página la recrearía y el efecto de carga volvería a dispararse.
+  const paginaIncidentesRef = useRef(1);
+  useEffect(() => {
+    paginaIncidentesRef.current = incidentesPage;
+  }, [incidentesPage]);
+  // Cada consulta lleva un número; solo la última puede actualizar la lista. Así una
+  // respuesta lenta de una página anterior no pisa la página actual ni reinicia la carga.
+  const ultimaConsultaRef = useRef(0);
+  const monitoreoPermitido = permisos.length === 0 || permisos.includes('incidente.monitorear');
+
   const cargarIncidentes = useCallback(
-    async (page: number = incidentesPage) => {
+    async (page: number = paginaIncidentesRef.current) => {
       if (!session) return;
+      // Un perfil sin monitoreo (por ejemplo, solo estadísticas) no consulta casos individuales
+      if (!monitoreoPermitido) return;
+      const consulta = ++ultimaConsultaRef.current;
+      const esVigente = () => consulta === ultimaConsultaRef.current;
       try {
         // 1. Intentar endpoint seguro de backend con privilegios y paginación
         const res = await fetch(`${apiBaseUrl}/api/v1/autoridad/incidentes?estado=${filtroEstado}&page=${page}&limit=10`, {
@@ -2061,8 +2387,10 @@ export default function App() {
 
         if (res.ok) {
           const json = await res.json();
+          if (!esVigente()) return;
           if (json && Array.isArray(json.incidentes)) {
             setIncidentes(json.incidentes as IncidenteItem[]);
+            paginaIncidentesRef.current = json.pagina_actual || page;
             setIncidentesPage(json.pagina_actual || page);
             setIncidentesTotalPages(json.total_paginas || 1);
             setIncidentesTotalRegistros(json.total_registros || 0);
@@ -2102,6 +2430,7 @@ export default function App() {
         }
 
         const { data, count, error } = await query;
+        if (!esVigente()) return;
         if (error) throw error;
         const mappedData: IncidenteItem[] = ((data as any[]) || []).map((row: any) => ({
           ...row,
@@ -2128,10 +2457,10 @@ export default function App() {
       } catch (err: any) {
         console.error('[PanelWeb] Error consultando incidentes:', err.message);
       } finally {
-        setLoadingData(false);
+        if (esVigente()) setLoadingData(false);
       }
     },
-    [session, filtroEstado, apiBaseUrl, incidentesPage]
+    [session, filtroEstado, apiBaseUrl, monitoreoPermitido]
   );
 
   useEffect(() => {
@@ -2288,9 +2617,30 @@ export default function App() {
     };
   }, [session, incidentesPage, cargarIncidentes, cargarTestigos, testigosPage, selectedIncidente?.id, activeMediaUrl, activeReproduciendoEvidenciaId]);
 
+  const completarInicioSesion = (sessionData: any, roleName: string) => {
+    setSession(sessionData);
+    setPermisos(sessionData.permisos || []);
+    setUserRole(roleName);
+
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem('apoyar_institutional_session', JSON.stringify(sessionData));
+      window.localStorage.setItem('apoyar_user_role', roleName);
+    }
+
+    setMfaStep(false);
+    setMfaFactorId(null);
+    setMfaCode('');
+    setMfaError(null);
+    setPendingSession(null);
+  };
+
   // Inicio de Sesión Institucional (Verifica password_institucional_hash con protección contra fuerza bruta)
   const handleLogin = async () => {
     if (authLoading || lockoutActive) return;
+    if (!email.trim() || !password) {
+      setAuthError('Por favor, ingresá tu correo institucional y contraseña.');
+      return;
+    }
     setAuthLoading(true);
     setAuthError(null);
     try {
@@ -2328,33 +2678,92 @@ export default function App() {
         roles: json.roles || [],
         permisos: json.permisos || [],
       };
-      setSession(localSession);
-      setPermisos(json.permisos || []);
 
       const roles: string[] = json.roles || [];
       const computedRole = roles.includes('Administrador')
         ? 'Administrador del Sistema'
         : roles.includes('Autoridad')
-        ? 'Autoridad Judicial / Policial'
-        : roles.filter((r) => r !== 'Civil')[0] || 'Operador Institucional';
-      setUserRole(computedRole);
+          ? 'Autoridad Judicial / Policial'
+          : roles.filter((r) => r !== 'Civil')[0] || 'Operador Institucional';
 
-      if (typeof window !== 'undefined' && window.localStorage) {
-        window.localStorage.setItem('apoyar_institutional_session', JSON.stringify(localSession));
-        window.localStorage.setItem('apoyar_user_role', computedRole);
-      }
-
+      // Autenticar en Supabase Auth
       try {
         await supabase.auth.signInWithPassword({
           email: email.trim(),
           password,
         });
-      } catch (_) {}
+      } catch (_) { }
+
+      // Verificar si la cuenta tiene 2FA (TOTP / Google Authenticator) configurado
+      const mfaStatus = await getMfaStatusAsync();
+      if (mfaStatus.requiresElevation && mfaStatus.verifiedFactorId) {
+        setPendingSession(localSession);
+        setPendingUserRole(computedRole);
+        setMfaFactorId(mfaStatus.verifiedFactorId);
+        setMfaCode('');
+        setMfaError(null);
+        setMfaStep(true);
+        return;
+      }
+
+      // Si no requiere 2FA, completar login inmediatamente
+      completarInicioSesion(localSession, computedRole);
     } catch (err: any) {
       setAuthError(err.message || 'Credenciales inválidas o acceso no autorizado.');
     } finally {
       setAuthLoading(false);
     }
+  };
+
+  const handleVerifyMfa = async () => {
+    if (mfaLoading) return;
+    const cleanCode = mfaCode.replace(/\D/g, '').trim();
+    if (cleanCode.length !== 6) {
+      setMfaError('Por favor, ingresá los 6 dígitos del código de tu app autenticadora.');
+      return;
+    }
+    if (!mfaFactorId) {
+      setMfaError('No se encontró el factor de autenticación configurado.');
+      return;
+    }
+
+    setMfaLoading(true);
+    setMfaError(null);
+    try {
+      await challengeAndVerifyMfaAsync(mfaFactorId, cleanCode);
+      if (pendingSession) {
+        completarInicioSesion(pendingSession, pendingUserRole);
+      } else {
+        const { data: { session: currentSession } } = await supabase.auth.getSession();
+        if (currentSession?.user) {
+          const localSession = {
+            access_token: currentSession.access_token,
+            token_type: 'bearer',
+            user: currentSession.user,
+            roles: [pendingUserRole || 'Operador'],
+            permisos: permisos || [],
+          };
+          completarInicioSesion(localSession, pendingUserRole || 'Operador Institucional');
+          verificarRolUsuario(currentSession.user.id, currentSession.access_token, currentSession.user.email);
+        }
+      }
+    } catch (err: any) {
+      setMfaError(err.message || 'Código incorrecto o expirado. Verificá tu app de autenticación.');
+    } finally {
+      setMfaLoading(false);
+    }
+  };
+
+  const handleCancelMfa = async () => {
+    setMfaLoading(false);
+    setMfaStep(false);
+    setMfaFactorId(null);
+    setMfaCode('');
+    setMfaError(null);
+    setPendingSession(null);
+    try {
+      await supabase.auth.signOut();
+    } catch (_) {}
   };
 
   const handleLogout = async () => {
@@ -2365,12 +2774,180 @@ export default function App() {
     await supabase.auth.signOut();
     setSession(null);
     setPermisos([]);
+    setVistaEstadisticas(false);
     setIncidentes([]);
     setSelectedIncidente(null);
+    setMfaStep(false);
+    setMfaFactorId(null);
+    setMfaCode('');
+    setMfaError(null);
+    setPendingSession(null);
   };
 
-  // Cambiar estado de incidente (ej: Cerrar / Reabrir)
-  const handleCambiarEstado = async (incidente: IncidenteItem, nuevoEstado: 'en_curso' | 'cerrado') => {
+  // ── Gestión del Perfil del Operador y Verificación en Dos Pasos (2FA) ──────
+  const handleCerrarPerfilModal = useCallback(() => {
+    if (profileMfaEnrollData?.factorId) {
+      unenrollTotpAsync(profileMfaEnrollData.factorId).catch(() => {});
+    }
+    setShowProfileModal(false);
+    setProfileMfaEnrolling(false);
+    setProfileMfaEnrollData(null);
+    setProfileMfaCode('');
+    setProfileMfaError(null);
+    setProfileMfaSuccess(null);
+    setProfileConfirmingDisable(false);
+  }, [profileMfaEnrollData?.factorId]);
+
+  const handleAbrirPerfilModal = async () => {
+    setShowProfileModal(true);
+    setProfileMfaEnrolling(false);
+    setProfileMfaEnrollData(null);
+    setProfileMfaCode('');
+    setProfileMfaError(null);
+    setProfileMfaSuccess(null);
+    setProfileConfirmingDisable(false);
+    setProfileMfaLoading(true);
+
+    // Limpieza preventiva de factores huérfanos/no verificados
+    cleanupUnverifiedFactorsAsync().catch(() => {});
+
+    try {
+      const [status, meRes] = await Promise.all([
+        getMfaStatusAsync(),
+        session?.access_token
+          ? fetch(`${apiBaseUrl}/api/v1/auth/me`, {
+              headers: { Authorization: `Bearer ${session.access_token}` },
+            }).catch(() => null)
+          : Promise.resolve(null),
+      ]);
+      setProfileMfaStatus(status);
+      if (meRes && meRes.ok) {
+        const meData = await meRes.json();
+        setProfileUserData(meData);
+      }
+    } catch (_) {
+    } finally {
+      setProfileMfaLoading(false);
+    }
+  };
+
+  const handleIniciarEnrollMfa = async () => {
+    setProfileMfaLoading(true);
+    setProfileMfaError(null);
+    setProfileMfaSuccess(null);
+    try {
+      const res = await enrollTotpAsync('ApoyAR Panel Web');
+      setProfileMfaEnrollData(res);
+      setProfileMfaEnrolling(true);
+      setProfileMfaCode('');
+    } catch (err: any) {
+      setProfileMfaError(err.message || 'Error al iniciar la activación de 2FA.');
+    } finally {
+      setProfileMfaLoading(false);
+    }
+  };
+
+  const handleConfirmarEnrollMfa = async () => {
+    if (!profileMfaEnrollData) return;
+    const cleanCode = profileMfaCode.replace(/\D/g, '').trim();
+    if (cleanCode.length !== 6) {
+      setProfileMfaError('Por favor, ingresá los 6 dígitos del código de tu app autenticadora.');
+      return;
+    }
+    setProfileMfaLoading(true);
+    setProfileMfaError(null);
+    try {
+      await confirmEnrollmentAsync(profileMfaEnrollData.factorId, cleanCode);
+      const updatedStatus = await getMfaStatusAsync();
+      setProfileMfaStatus(updatedStatus);
+      setProfileMfaEnrolling(false);
+      setProfileMfaEnrollData(null);
+      setProfileMfaCode('');
+      setProfileMfaSuccess('¡Verificación en dos pasos activada exitosamente!');
+    } catch (err: any) {
+      setProfileMfaError(err.message || 'Código incorrecto. Verificá tu app e intentá nuevamente.');
+    } finally {
+      setProfileMfaLoading(false);
+    }
+  };
+
+  const handleDesactivarMfa = async () => {
+    setProfileMfaLoading(true);
+    setProfileMfaError(null);
+    setProfileMfaSuccess(null);
+    try {
+      await disableAllMfaAsync();
+      const updatedStatus = await getMfaStatusAsync();
+      setProfileMfaStatus(updatedStatus);
+      setProfileConfirmingDisable(false);
+      setProfileMfaSuccess('Verificación en dos pasos desactivada correctamente.');
+    } catch (err: any) {
+      setProfileMfaError(err.message || 'Error al desactivar 2FA.');
+    } finally {
+      setProfileMfaLoading(false);
+    }
+  };
+
+  // Cierre de una emergencia por un operador: el motivo queda en las notas del incidente
+  const [cierreIncidente, setCierreIncidente] = useState<IncidenteItem | null>(null);
+  const [cierreMotivo, setCierreMotivo] = useState(MOTIVOS_CIERRE[0].valor);
+  const [cierreDetalle, setCierreDetalle] = useState('');
+  const [cerrandoIncidente, setCerrandoIncidente] = useState(false);
+
+  const handleConfirmarCierre = async () => {
+    if (!cierreIncidente || cierreDetalle.trim().length < 10) return;
+    const motivo = MOTIVOS_CIERRE.find((m) => m.valor === cierreMotivo) ?? MOTIVOS_CIERRE[0];
+    const operador = (session as any)?.user?.email || userRole;
+    setCerrandoIncidente(true);
+    try {
+      const res = await fetch(`${apiBaseUrl}/api/v1/incidentes/${cierreIncidente.id}/estado`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session?.access_token}`,
+        },
+        body: JSON.stringify({
+          estado: 'cerrado',
+          notas: `Cerrado desde la consola web por ${operador}. Motivo: ${motivo.etiqueta}. Detalle: ${cierreDetalle.trim()}`,
+        }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json.detail || `HTTP ${res.status}`);
+      }
+
+      // Aproximación local hasta la próxima carga, que trae la hora exacta del historial
+      const fechaFin = new Date().toISOString();
+      const id = cierreIncidente.id;
+      setIncidentes((prev) => prev.map((i) => (i.id === id ? { ...i, estado: 'cerrado', fecha_fin: fechaFin } : i)));
+      setSelectedIncidente((prev) => (prev && prev.id === id ? { ...prev, estado: 'cerrado', fecha_fin: fechaFin } : prev));
+      setCierreIncidente(null);
+      showToast('Emergencia Cerrada', 'El cierre quedó registrado con el motivo indicado.', 'success');
+    } catch (err: any) {
+      showToast('Error al Cerrar', `No se pudo cerrar la emergencia: ${err.message}`, 'error');
+    } finally {
+      setCerrandoIncidente(false);
+    }
+  };
+
+  // Revisión de un caso cerrado: se guarda como nota con el mismo estado, así la emergencia no se reactiva
+  const [accionRevision, setAccionRevision] = useState<AccionRevision | null>(null);
+  const [revisionTexto, setRevisionTexto] = useState('');
+  const [guardandoRevision, setGuardandoRevision] = useState(false);
+  const casoEnRevision = Boolean(
+    selectedIncidente && selectedIncidente.estado !== 'en_curso' && estaEnRevision(notasDeIncidente(selectedIncidente))
+  );
+
+  const abrirAccionRevision = (accion: AccionRevision) => {
+    setRevisionTexto('');
+    setAccionRevision(accion);
+  };
+
+  const handleConfirmarRevision = async () => {
+    if (!selectedIncidente || !accionRevision || revisionTexto.trim().length < 10) return;
+    const incidente = selectedIncidente;
+    const nota = notaRevision(accionRevision, (session as any)?.user?.email || userRole, revisionTexto);
+    setGuardandoRevision(true);
     try {
       const res = await fetch(`${apiBaseUrl}/api/v1/incidentes/${incidente.id}/estado`, {
         method: 'PATCH',
@@ -2378,29 +2955,26 @@ export default function App() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${session?.access_token}`,
         },
-        body: JSON.stringify({
-          estado: nuevoEstado,
-          notas: `Actualizado a ${nuevoEstado} desde Consola Web por ${userRole}`,
-        }),
+        body: JSON.stringify({ estado: incidente.estado, notas: nota }),
       });
-
       if (!res.ok) {
-        const { error } = await supabase
-          .from('incidente')
-          .update({ inc_estado: nuevoEstado })
-          .eq('inc_id_incidente', incidente.id);
-
-        if (error) throw error;
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json.detail || `HTTP ${res.status}`);
       }
 
-      setIncidentes((prev) =>
-        prev.map((i) => (i.id === incidente.id ? { ...i, estado: nuevoEstado } : i))
+      const notas = [notasDeIncidente(incidente), nota].filter(Boolean).join('\n');
+      setIncidentes((prev) => prev.map((i) => (i.id === incidente.id ? { ...i, notas, inc_notas: notas } as IncidenteItem : i)));
+      setSelectedIncidente((prev) => (prev && prev.id === incidente.id ? ({ ...prev, notas, inc_notas: notas } as IncidenteItem) : prev));
+      setAccionRevision(null);
+      showToast(
+        'Caso Actualizado',
+        accionRevision === 'reabrir' ? 'El caso quedó en revisión.' : accionRevision === 'cerrar_revision' ? 'La revisión del caso quedó cerrada.' : 'La nota de seguimiento quedó registrada.',
+        'success'
       );
-      if (selectedIncidente?.id === incidente.id) {
-        setSelectedIncidente({ ...selectedIncidente, estado: nuevoEstado });
-      }
     } catch (err: any) {
-      showToast('Error al Actualizar Estado', `Error al actualizar estado: ${err.message}`, 'error');
+      showToast('Error al Actualizar el Caso', err.message || 'No se pudo registrar la acción.', 'error');
+    } finally {
+      setGuardandoRevision(false);
     }
   };
 
@@ -2426,7 +3000,7 @@ export default function App() {
         type: 'warning',
         confirmText: 'Entendido',
         cancelText: null,
-        onConfirm: () => {},
+        onConfirm: () => { },
       });
       return;
     }
@@ -2620,7 +3194,7 @@ export default function App() {
         type: 'warning',
         confirmText: 'Entendido',
         cancelText: null,
-        onConfirm: () => {},
+        onConfirm: () => { },
       });
       return;
     }
@@ -2675,6 +3249,10 @@ export default function App() {
     return incidentes.filter((inc) => {
       // El estado puede cambiar en tiempo real sin que se vuelva a consultar la lista
       if (filtroEstado !== 'todos' && inc.estado !== filtroEstado) return false;
+      if (filtroEstado === 'todos' && filtroEstadoTodos !== 'todos') {
+        const enRevision = inc.estado !== 'en_curso' && estaEnRevision(notasDeIncidente(inc));
+        if (filtroEstadoTodos === 'en_revision' ? !enRevision : enRevision || inc.estado !== filtroEstadoTodos) return false;
+      }
 
       const dirTotal = normalizar(`${inc.direccion || ''} ${inc.direccion_aprox || ''}`);
 
@@ -2719,7 +3297,7 @@ export default function App() {
 
       return true;
     });
-  }, [incidentes, filtroEstado, busquedaTexto, filtroFechaInicio, filtroFechaFin, filtroCiudad, filtroCalle, filtroNumero]);
+  }, [incidentes, filtroEstado, filtroEstadoTodos, busquedaTexto, filtroFechaInicio, filtroFechaFin, filtroCiudad, filtroCalle, filtroNumero]);
 
   // Marcadores interactivos para MapViewComponent (sincronizados con los filtros activos)
   const mapMarkers: IncidentMarker[] = useMemo(() => {
@@ -2760,13 +3338,21 @@ export default function App() {
       cargarTestigos(pagina);
       return;
     }
+    if (pagina === paginaIncidentesRef.current) return;
+    paginaIncidentesRef.current = pagina;
     setIncidentesPage(pagina);
+    setLoadingData(true);
     cargarIncidentes(pagina);
   };
 
   const handleElegirPestanaEstado = (estado: 'en_curso' | 'cerrado' | 'todos') => {
     setVerTestigos(false);
     setTestigoSeleccionado(null);
+    // Otro filtro empieza siempre desde la primera página
+    if (estado !== filtroEstado) {
+      paginaIncidentesRef.current = 1;
+      setIncidentesPage(1);
+    }
     setFiltroEstado(estado);
   };
 
@@ -2793,10 +3379,10 @@ export default function App() {
                 confirmConfig.type === 'danger'
                   ? colors.semantic.danger
                   : confirmConfig.type === 'warning'
-                  ? '#F59E0B'
-                  : confirmConfig.type === 'success'
-                  ? '#10B981'
-                  : colors.semantic.info,
+                    ? '#F59E0B'
+                    : confirmConfig.type === 'success'
+                      ? '#10B981'
+                      : colors.semantic.info,
             },
           ]}
         >
@@ -2808,10 +3394,10 @@ export default function App() {
                   confirmConfig.type === 'danger'
                     ? colors.semantic.dangerBg
                     : confirmConfig.type === 'warning'
-                    ? '#331B0A'
-                    : confirmConfig.type === 'success'
-                    ? (isDark ? 'rgba(16, 185, 129, 0.2)' : '#D1FAE5')
-                    : colors.semantic.infoBg,
+                      ? '#331B0A'
+                      : confirmConfig.type === 'success'
+                        ? (isDark ? 'rgba(16, 185, 129, 0.2)' : '#D1FAE5')
+                        : colors.semantic.infoBg,
               },
             ]}
           >
@@ -2854,10 +3440,10 @@ export default function App() {
                     confirmConfig.type === 'danger'
                       ? colors.semantic.danger
                       : confirmConfig.type === 'warning'
-                      ? '#D97706'
-                      : confirmConfig.type === 'success'
-                      ? '#059669'
-                      : colors.semantic.info,
+                        ? '#D97706'
+                        : confirmConfig.type === 'success'
+                          ? '#059669'
+                          : colors.semantic.info,
                 },
               ]}
               onPress={() => {
@@ -2887,42 +3473,42 @@ export default function App() {
     const accentColor = isSuccess
       ? '#10B981'
       : isWarning
-      ? '#F59E0B'
-      : isError
-      ? '#EF4444'
-      : '#3B82F6';
+        ? '#F59E0B'
+        : isError
+          ? '#EF4444'
+          : '#3B82F6';
 
     const bgColor = isDark
       ? isSuccess
         ? '#06261C'
         : isWarning
-        ? '#261605'
-        : isError
-        ? '#2A0B0E'
-        : '#081B2E'
+          ? '#261605'
+          : isError
+            ? '#2A0B0E'
+            : '#081B2E'
       : isSuccess
-      ? '#ECFDF5'
-      : isWarning
-      ? '#FFFBEB'
-      : isError
-      ? '#FEF2F2'
-      : '#EFF6FF';
+        ? '#ECFDF5'
+        : isWarning
+          ? '#FFFBEB'
+          : isError
+            ? '#FEF2F2'
+            : '#EFF6FF';
 
     const iconBg = isDark
       ? isSuccess
         ? 'rgba(16, 185, 129, 0.2)'
         : isWarning
-        ? 'rgba(245, 158, 11, 0.2)'
-        : isError
-        ? 'rgba(239, 68, 68, 0.2)'
-        : 'rgba(59, 130, 246, 0.2)'
+          ? 'rgba(245, 158, 11, 0.2)'
+          : isError
+            ? 'rgba(239, 68, 68, 0.2)'
+            : 'rgba(59, 130, 246, 0.2)'
       : isSuccess
-      ? '#D1FAE5'
-      : isWarning
-      ? '#FEF3C7'
-      : isError
-      ? '#FEE2E2'
-      : '#DBEAFE';
+        ? '#D1FAE5'
+        : isWarning
+          ? '#FEF3C7'
+          : isError
+            ? '#FEE2E2'
+            : '#DBEAFE';
 
     return (
       <View
@@ -3230,7 +3816,7 @@ export default function App() {
     </Modal>
   );
 
-  // ── PANTALLA DE INICIO DE SESIÓN ─────────────────────────────────────────────
+  // ── PANTALLA DE INICIO DE SESIÓN / VERIFICACIÓN 2FA ─────────────────────────
   if (!session) {
     return (
       <View style={[styles.authContainer, { backgroundColor: colors.bg.base }]}>
@@ -3244,106 +3830,230 @@ export default function App() {
             {isDark ? <Sun size={18} color={colors.semantic.warning} /> : <Moon size={18} color={colors.text.primary} />}
           </TouchableOpacity>
 
-          {/* Logo Oficial ApoyAR */}
-          <View style={styles.authLogoBox}>
-            <Image source={LOGO_SOURCE} style={styles.authLogo} resizeMode="contain" />
-          </View>
+          {mfaStep ? (
+            <>
+              {/* Paso 2: Verificación de Dos Pasos (Google Authenticator / TOTP) */}
+              <View style={styles.authLogoBox}>
+                <View
+                  style={{
+                    width: 72,
+                    height: 72,
+                    borderRadius: 36,
+                    backgroundColor: colors.semantic.infoBg,
+                    borderWidth: 1.5,
+                    borderColor: colors.semantic.info,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  <ShieldCheck size={36} color={colors.semantic.info} />
+                </View>
+              </View>
 
-          <Text style={[styles.authTitle, { color: colors.text.primary }]}>ApoyAR</Text>
-          <Text style={[styles.authRoleTag, { color: colors.semantic.info, backgroundColor: colors.semantic.infoBg }]}>
-            Centro de Monitoreo y Supervisión Judicial
-          </Text>
-          <Text style={[styles.authSubtitle, { color: colors.text.secondary }]}>
-            Acceso restringido para Autoridades de Seguridad y Administradores
-          </Text>
+              <Text style={[styles.authTitle, { color: colors.text.primary }]}>Verificación en dos pasos</Text>
+              <Text style={[styles.authRoleTag, { color: colors.semantic.info, backgroundColor: colors.semantic.infoBg }]}>
+                Google Authenticator / TOTP
+              </Text>
+              <Text style={[styles.authSubtitle, { color: colors.text.secondary, marginBottom: spacing.md }]}>
+                Ingresá el código de seguridad de 6 dígitos generado por tu aplicación de autenticación para continuar.
+              </Text>
 
-          {authError && (
-            <View style={[styles.errorBox, { backgroundColor: colors.semantic.dangerBg, borderColor: colors.semantic.danger }]}>
-              <AlertTriangle size={16} color={colors.semantic.danger} style={{ marginRight: 6 }} />
-              <Text style={[styles.errorText, { color: colors.semantic.danger }]}>{authError}</Text>
-            </View>
-          )}
+              {mfaError && (
+                <View style={[styles.errorBox, { backgroundColor: colors.semantic.dangerBg, borderColor: colors.semantic.danger }]}>
+                  <AlertTriangle size={16} color={colors.semantic.danger} style={{ marginRight: 6 }} />
+                  <Text style={[styles.errorText, { color: colors.semantic.danger }]}>{mfaError}</Text>
+                </View>
+              )}
 
-          <View style={styles.inputGroup}>
-            <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Correo Institucional</Text>
-            <View style={[styles.inputWrapper, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
-              <TextInput
-                style={[styles.textInput, { color: colors.text.primary }]}
-                placeholder="operador@apoyar.gob.ar"
-                placeholderTextColor={colors.text.disabled}
-                value={email}
-                onChangeText={setEmail}
-                autoCapitalize="none"
-              />
-            </View>
-          </View>
+              <View style={styles.inputGroup}>
+                <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Código de Verificación (6 dígitos)</Text>
+                <View style={[styles.inputWrapper, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
+                  <TextInput
+                    style={[
+                      styles.textInput,
+                      {
+                        color: colors.text.primary,
+                        fontSize: 22,
+                        letterSpacing: 6,
+                        textAlign: 'center',
+                        fontWeight: '700',
+                        outlineWidth: 0 as any,
+                      },
+                    ]}
+                    placeholder="000000"
+                    placeholderTextColor={colors.text.disabled}
+                    value={mfaCode}
+                    onChangeText={(val) => {
+                      const cleaned = val.replace(/\D/g, '').slice(0, 6);
+                      setMfaCode(cleaned);
+                      if (mfaError) setMfaError(null);
+                    }}
+                    keyboardType="number-pad"
+                    maxLength={6}
+                    autoFocus
+                    returnKeyType="done"
+                    onSubmitEditing={handleVerifyMfa}
+                    onKeyPress={(e: any) => {
+                      if (e.nativeEvent?.key === 'Enter' || e.key === 'Enter') {
+                        handleVerifyMfa();
+                      }
+                    }}
+                  />
+                </View>
+              </View>
 
-          <View style={styles.inputGroup}>
-            <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Contraseña de Acceso Seguro</Text>
-            <View style={[styles.inputWrapper, { backgroundColor: colors.bg.base, borderColor: colors.border.default, flexDirection: 'row', alignItems: 'center' }]}>
-              <TextInput
-                style={[styles.textInput, { color: colors.text.primary, flex: 1, outlineWidth: 0 as any }]}
-                placeholder="••••••••••••"
-                placeholderTextColor={colors.text.disabled}
-                value={password}
-                onChangeText={setPassword}
-                secureTextEntry={!showLoginPassword}
-              />
               <TouchableOpacity
-                onPress={() => setShowLoginPassword((prev) => !prev)}
-                style={{ padding: 4 }}
-                accessibilityLabel={showLoginPassword ? "Ocultar contraseña" : "Ver contraseña"}
+                style={[
+                  styles.primaryButton,
+                  { backgroundColor: colors.semantic.info },
+                  (mfaLoading || mfaCode.replace(/\D/g, '').length !== 6) && { opacity: 0.75 },
+                ]}
+                onPress={handleVerifyMfa}
+                disabled={mfaLoading || mfaCode.replace(/\D/g, '').length !== 6}
               >
-                {showLoginPassword ? (
-                  <EyeOff size={18} color={colors.text.secondary} />
+                {mfaLoading ? (
+                  <ActivityIndicator color="#FFFFFF" />
                 ) : (
-                  <Eye size={18} color={colors.text.secondary} />
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <ShieldCheck size={18} color="#FFFFFF" />
+                    <Text style={styles.buttonText}>Verificar y Acceder</Text>
+                  </View>
                 )}
               </TouchableOpacity>
-            </View>
-          </View>
 
-          <TouchableOpacity
-            style={[
-              styles.primaryButton,
-              { backgroundColor: lockoutActive ? colors.semantic.danger : colors.semantic.info },
-              (authLoading || lockoutActive) && { opacity: 0.75 },
-            ]}
-            onPress={handleLogin}
-            disabled={authLoading || lockoutActive}
-          >
-            {authLoading ? (
-              <ActivityIndicator color="#FFFFFF" />
-            ) : lockoutActive ? (
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <Clock size={16} color="#FFFFFF" />
-                <Text style={styles.buttonText}>
-                  Reintentar en {Math.floor(lockoutRemainingSeconds / 60)}:{(lockoutRemainingSeconds % 60).toString().padStart(2, '0')}
+              <TouchableOpacity
+                style={[styles.forgotPasswordBtn, { marginTop: spacing.md }]}
+                onPress={handleCancelMfa}
+                disabled={mfaLoading}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                  <ArrowLeft size={16} color={colors.semantic.info} />
+                  <Text style={[styles.forgotPasswordText, { color: colors.semantic.info }]}>
+                    Cancelar y volver al inicio
+                  </Text>
+                </View>
+              </TouchableOpacity>
+            </>
+          ) : (
+            <>
+              {/* Paso 1: Formulario de Inicio de Sesión */}
+              {/* Logo Oficial ApoyAR */}
+              <View style={styles.authLogoBox}>
+                <Image source={LOGO_SOURCE} style={styles.authLogo} resizeMode="contain" />
+              </View>
+
+              <Text style={[styles.authTitle, { color: colors.text.primary }]}>ApoyAR</Text>
+              <Text style={[styles.authRoleTag, { color: colors.semantic.info, backgroundColor: colors.semantic.infoBg }]}>
+                Centro de Monitoreo y Supervisión Judicial
+              </Text>
+              <Text style={[styles.authSubtitle, { color: colors.text.secondary }]}>
+                Acceso restringido para Autoridades de Seguridad y Administradores
+              </Text>
+
+              {authError && (
+                <View style={[styles.errorBox, { backgroundColor: colors.semantic.dangerBg, borderColor: colors.semantic.danger }]}>
+                  <AlertTriangle size={16} color={colors.semantic.danger} style={{ marginRight: 6 }} />
+                  <Text style={[styles.errorText, { color: colors.semantic.danger }]}>{authError}</Text>
+                </View>
+              )}
+
+              <View style={styles.inputGroup}>
+                <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Correo Institucional</Text>
+                <View style={[styles.inputWrapper, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
+                  <TextInput
+                    style={[styles.textInput, { color: colors.text.primary, outlineWidth: 0 as any }]}
+                    placeholder="operador@apoyar.gob.ar"
+                    placeholderTextColor={colors.text.disabled}
+                    value={email}
+                    onChangeText={setEmail}
+                    autoCapitalize="none"
+                    keyboardType="email-address"
+                    returnKeyType="next"
+                    onSubmitEditing={handleLogin}
+                    onKeyPress={(e: any) => {
+                      if (e.nativeEvent?.key === 'Enter' || e.key === 'Enter') {
+                        handleLogin();
+                      }
+                    }}
+                  />
+                </View>
+              </View>
+
+              <View style={styles.inputGroup}>
+                <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Contraseña de Acceso Seguro</Text>
+                <View style={[styles.inputWrapper, { backgroundColor: colors.bg.base, borderColor: colors.border.default, flexDirection: 'row', alignItems: 'center' }]}>
+                  <TextInput
+                    style={[styles.textInput, { color: colors.text.primary, flex: 1, outlineWidth: 0 as any }]}
+                    placeholder="••••••••••••"
+                    placeholderTextColor={colors.text.disabled}
+                    value={password}
+                    onChangeText={setPassword}
+                    secureTextEntry={!showLoginPassword}
+                    returnKeyType="done"
+                    onSubmitEditing={handleLogin}
+                    onKeyPress={(e: any) => {
+                      if (e.nativeEvent?.key === 'Enter' || e.key === 'Enter') {
+                        handleLogin();
+                      }
+                    }}
+                  />
+                  <TouchableOpacity
+                    onPress={() => setShowLoginPassword((prev) => !prev)}
+                    style={{ padding: 4 }}
+                    accessibilityLabel={showLoginPassword ? "Ocultar contraseña" : "Ver contraseña"}
+                  >
+                    {showLoginPassword ? (
+                      <EyeOff size={18} color={colors.text.secondary} />
+                    ) : (
+                      <Eye size={18} color={colors.text.secondary} />
+                    )}
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              <TouchableOpacity
+                style={[
+                  styles.primaryButton,
+                  { backgroundColor: lockoutActive ? colors.semantic.danger : colors.semantic.info },
+                  (authLoading || lockoutActive) && { opacity: 0.75 },
+                ]}
+                onPress={handleLogin}
+                disabled={authLoading || lockoutActive}
+              >
+                {authLoading ? (
+                  <ActivityIndicator color="#FFFFFF" />
+                ) : lockoutActive ? (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <Clock size={16} color="#FFFFFF" />
+                    <Text style={styles.buttonText}>
+                      Reintentar en {Math.floor(lockoutRemainingSeconds / 60)}:{(lockoutRemainingSeconds % 60).toString().padStart(2, '0')}
+                    </Text>
+                  </View>
+                ) : (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <Lock size={16} color="#FFFFFF" />
+                    <Text style={styles.buttonText}>Acceder al Sistema</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+
+              {/* Enlace Recuperar Contraseña Institucional */}
+              <TouchableOpacity
+                style={styles.forgotPasswordBtn}
+                onPress={() => {
+                  setShowRecoveryModal(true);
+                  setRecoveryStep(1);
+                  setRecoveryEmail(email || '');
+                  setRecoveryError(null);
+                  setRecoverySuccess(null);
+                }}
+              >
+                <Text style={[styles.forgotPasswordText, { color: colors.semantic.info }]}>
+                  ¿Olvidaste tu contraseña? Recuperar acceso
                 </Text>
-              </View>
-            ) : (
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <Lock size={16} color="#FFFFFF" />
-                <Text style={styles.buttonText}>Acceder al Sistema</Text>
-              </View>
-            )}
-          </TouchableOpacity>
-
-          {/* Enlace Recuperar Contraseña Institucional */}
-          <TouchableOpacity
-            style={styles.forgotPasswordBtn}
-            onPress={() => {
-              setShowRecoveryModal(true);
-              setRecoveryStep(1);
-              setRecoveryEmail(email || '');
-              setRecoveryError(null);
-              setRecoverySuccess(null);
-            }}
-          >
-            <Text style={[styles.forgotPasswordText, { color: colors.semantic.info }]}>
-              ¿Olvidaste tu contraseña? Recuperar acceso
-            </Text>
-          </TouchableOpacity>
+              </TouchableOpacity>
+            </>
+          )}
 
           <Text style={[styles.securityNotice, { color: colors.text.disabled }]}>
             Comunicaciones cifradas bajo TLS 1.3 con validación estricta de credenciales JWT y RBAC.
@@ -3394,45 +4104,47 @@ export default function App() {
             </View>
           )}
 
-          {/* Botones de Gestión y Creación de Operarios (Para Administradores) */}
-          {puede('usuario.gestionar') && (
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              {/* Botón Gestión de Operadores */}
-              <TouchableOpacity
-                style={[styles.headerAdminBtn, { backgroundColor: colors.semantic.infoBg, borderColor: colors.semantic.info }]}
-                onPress={() => {
-                  setShowUsersModal(true);
-                  setAdminTab('activos');
-                  cargarUsuariosAdmin('activos', 1);
-                }}
-                accessibilityLabel="Gestión de Operadores y Autoridades"
-              >
-                <Users size={16} color={colors.semantic.info} style={{ marginRight: 6 }} />
-                <Text style={[styles.headerAdminBtnText, { color: colors.semantic.info }]}>Operadores</Text>
-              </TouchableOpacity>
-
-              {/* Botón Destacado: Dar de Alta Nuevo Operario */}
-              <TouchableOpacity
-                style={[
-                  styles.headerAdminBtn,
-                  {
-                    backgroundColor: isDark ? '#1C2E3D' : '#E0F2FE',
-                    borderColor: colors.semantic.info,
-                  },
-                ]}
-                onPress={() => {
-                  setShowUsersModal(true);
-                  setAdminTab('crear');
-                }}
-                accessibilityLabel="Dar de Alta Nuevo Operario"
-              >
-                <UserPlus size={16} color={colors.semantic.info} style={{ marginRight: 6 }} />
-                <Text style={[styles.headerAdminBtnText, { color: colors.semantic.info, fontWeight: '700' }]}>
-                  + Alta de Operario
-                </Text>
-              </TouchableOpacity>
-            </View>
+          {/* Botón Estadísticas (permiso incidente.estadisticas); alterna con el monitoreo */}
+          {puede('incidente.estadisticas') && !soloEstadisticas && (
+            <TouchableOpacity
+              style={[
+                styles.headerAdminBtn,
+                vistaEstadisticas
+                  ? { backgroundColor: colors.semantic.info, borderColor: colors.semantic.info }
+                  : { backgroundColor: colors.semantic.infoBg, borderColor: colors.semantic.info },
+              ]}
+              onPress={() => setVistaEstadisticas((v) => !v)}
+              accessibilityLabel="Estadísticas de emergencias"
+            >
+              <BarChart3 size={16} color={vistaEstadisticas ? colors.bg.surface : colors.semantic.info} style={{ marginRight: 6 }} />
+              <Text style={[styles.headerAdminBtnText, { color: vistaEstadisticas ? colors.bg.surface : colors.semantic.info }]}>Estadísticas</Text>
+            </TouchableOpacity>
           )}
+
+          {/* Botón Gestión de Operadores (Para Administradores) */}
+          {puede('usuario.gestionar') && (
+            <TouchableOpacity
+              style={[styles.headerAdminBtn, { backgroundColor: colors.semantic.infoBg, borderColor: colors.semantic.info }]}
+              onPress={() => {
+                setShowUsersModal(true);
+                setAdminTab('activos');
+                cargarUsuariosAdmin('activos', 1);
+              }}
+              accessibilityLabel="Gestión de Operadores y Autoridades"
+            >
+              <Users size={16} color={colors.semantic.info} style={{ marginRight: 6 }} />
+              <Text style={[styles.headerAdminBtnText, { color: colors.semantic.info }]}>Operadores</Text>
+            </TouchableOpacity>
+          )}
+
+          {/* Botón de Perfil del Operador y Seguridad 2FA (icono de persona, estilo compacto como el sol) */}
+          <TouchableOpacity
+            style={[styles.headerIconBtn, { backgroundColor: colors.bg.elevated, borderColor: colors.border.default }]}
+            onPress={handleAbrirPerfilModal}
+            accessibilityLabel="Mi Perfil Institucional y Seguridad 2FA"
+          >
+            <User size={18} color={colors.text.primary} />
+          </TouchableOpacity>
 
           {/* Botón de Alternar Modo Claro / Oscuro */}
           <TouchableOpacity
@@ -3465,8 +4177,21 @@ export default function App() {
         </View>
       </View>
 
+      {/* ── ESTADÍSTICAS ANÓNIMAS (RF-4.4 / CU-11) ── */}
+      {mostrarEstadisticas && (
+        <EstadisticasPanel
+          apiBaseUrl={apiBaseUrl}
+          token={session?.access_token}
+          colors={colors}
+          isDark={isDark}
+          onToast={showToast}
+          onVolver={soloEstadisticas ? undefined : () => setVistaEstadisticas(false)}
+        />
+      )}
+
       {/* ── CUERPO DIVIDIDO: BANDEJA LATERAL + MAPA INTERACTIVO ── */}
-      <View style={styles.mainLayout}>
+      {/* Se oculta sin desmontarse para conservar el mapa y la selección al volver */}
+      <View style={[styles.mainLayout, mostrarEstadisticas && { display: 'none' }]}>
         {/* PANEL IZQUIERDO: Listado de Alertas y Filtros */}
         <View style={[styles.sidebar, { backgroundColor: colors.bg.surface, borderRightColor: colors.border.default }]}>
           {/* Barra de Búsqueda y Filtros por Persona, Calle y Fecha */}
@@ -3796,6 +4521,33 @@ export default function App() {
             )}
           </View>
 
+          {/* Filtro por estado dentro de "Todos" */}
+          {!verTestigos && filtroEstado === 'todos' && (
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.border.default }}>
+              {ESTADOS_FILTRO_TODOS.map((opcion) => {
+                const elegido = filtroEstadoTodos === opcion.valor;
+                return (
+                  <TouchableOpacity
+                    key={opcion.valor}
+                    onPress={() => setFiltroEstadoTodos(opcion.valor)}
+                    style={{
+                      paddingHorizontal: 10,
+                      paddingVertical: 4,
+                      borderRadius: radii.full,
+                      borderWidth: 1,
+                      backgroundColor: elegido ? colors.semantic.infoBg : 'transparent',
+                      borderColor: elegido ? colors.semantic.info : colors.border.default,
+                    }}
+                  >
+                    <Text style={{ fontSize: 11, fontWeight: elegido ? '700' : '500', color: elegido ? colors.semantic.info : colors.text.secondary }}>
+                      {opcion.etiqueta}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          )}
+
           {/* Listado de Incidentes o de Testigos */}
           {verTestigos ? renderListaTestigos() : loadingData ? (
             <View style={styles.centerBox}>
@@ -3822,6 +4574,7 @@ export default function App() {
               renderItem={({ item }) => {
                 const isSelected = selectedIncidente?.id === item.id;
                 const isEnCurso = item.estado === 'en_curso';
+                const enRevision = !isEnCurso && estaEnRevision(notasDeIncidente(item));
 
                 return (
                   <TouchableOpacity
@@ -3838,7 +4591,7 @@ export default function App() {
                     <View style={styles.cardHeader}>
                       <View style={{ flex: 1, paddingRight: 6 }}>
                         <Text style={[styles.victimName, { color: colors.text.primary }]} numberOfLines={1}>
-                          {item.victima_nombre || 'Persona registrada'}
+                          {item.victima_nombre || (item.victima_id ? 'Persona registrada' : 'Cuenta eliminada (anonimizado)')}
                         </Text>
                         <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>
                           <MapPin size={12} color={colors.text.secondary} style={{ marginRight: 4 }} />
@@ -3858,18 +4611,18 @@ export default function App() {
                         style={[
                           styles.stateBadge,
                           {
-                            backgroundColor: isEnCurso ? colors.semantic.dangerBg : colors.semantic.successBg,
-                            borderColor: isEnCurso ? colors.semantic.danger : colors.semantic.success,
+                            backgroundColor: isEnCurso ? colors.semantic.dangerBg : enRevision ? colors.semantic.warningBg : colors.semantic.successBg,
+                            borderColor: isEnCurso ? colors.semantic.danger : enRevision ? colors.semantic.warning : colors.semantic.success,
                           },
                         ]}
                       >
                         <Text
                           style={[
                             styles.stateBadgeText,
-                            { color: isEnCurso ? colors.semantic.danger : colors.semantic.success },
+                            { color: isEnCurso ? colors.semantic.danger : enRevision ? colors.semantic.warning : colors.semantic.success },
                           ]}
                         >
-                          {isEnCurso ? 'EN CURSO' : 'CERRADO'}
+                          {isEnCurso ? 'EN CURSO' : enRevision ? 'EN REVISIÓN' : 'CERRADO'}
                         </Text>
                       </View>
                     </View>
@@ -3974,7 +4727,7 @@ export default function App() {
                 <View style={{ flex: 1, paddingRight: 8 }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                     <Text style={[styles.drawerTitle, { color: colors.text.primary }]}>
-                      {selectedIncidente.victima_nombre || 'Víctima Protegida'}
+                      {selectedIncidente.victima_nombre || (selectedIncidente.victima_id ? 'Víctima Protegida' : 'Cuenta eliminada (anonimizado)')}
                     </Text>
                     <View
                       style={[
@@ -3983,10 +4736,14 @@ export default function App() {
                           backgroundColor:
                             selectedIncidente.estado === 'en_curso'
                               ? colors.semantic.dangerBg
+                              : casoEnRevision
+                              ? colors.semantic.warningBg
                               : colors.semantic.successBg,
                           borderColor:
                             selectedIncidente.estado === 'en_curso'
                               ? colors.semantic.danger
+                              : casoEnRevision
+                              ? colors.semantic.warning
                               : colors.semantic.success,
                         },
                       ]}
@@ -3998,13 +4755,32 @@ export default function App() {
                             color:
                               selectedIncidente.estado === 'en_curso'
                                 ? colors.semantic.danger
+                                : casoEnRevision
+                                ? colors.semantic.warning
                                 : colors.semantic.success,
                           },
                         ]}
                       >
-                        {formatEstado(selectedIncidente.estado)}
+                        {casoEnRevision ? 'EN REVISIÓN' : formatEstado(selectedIncidente.estado)}
                       </Text>
                     </View>
+                    {/* Abre la ubicación en Google Maps; (0, 0) significa que no hubo GPS */}
+                    {!(Number(selectedIncidente.latitud) === 0 && Number(selectedIncidente.longitud) === 0) && (
+                      <TouchableOpacity
+                        onPress={() =>
+                          window.open(
+                            `https://www.google.com/maps/search/?api=1&query=${selectedIncidente.latitud},${selectedIncidente.longitud}`,
+                            '_blank',
+                            'noopener,noreferrer'
+                          )
+                        }
+                        style={{ padding: 4, borderRadius: radii.sm, backgroundColor: colors.semantic.infoBg }}
+                        accessibilityLabel="Abrir ubicación en Google Maps"
+                        accessibilityRole="link"
+                      >
+                        <Navigation size={14} color={colors.semantic.info} />
+                      </TouchableOpacity>
+                    )}
                   </View>
                   <Text style={[styles.drawerIdText, { color: colors.text.disabled }]}>
                     ID: {selectedIncidente.id}
@@ -4044,6 +4820,16 @@ export default function App() {
                     {new Date(selectedIncidente.fecha_hora).toLocaleString('es-AR')}
                   </Text>
                 </View>
+
+                {selectedIncidente.estado !== 'en_curso' && selectedIncidente.fecha_fin && (
+                  <View style={styles.infoRow}>
+                    <Clock size={15} color={colors.text.secondary} style={{ marginRight: 6 }} />
+                    <Text style={[styles.infoLabel, { color: colors.text.secondary }]}>Fin:</Text>
+                    <Text style={[styles.infoValue, { color: colors.text.primary }]}>
+                      {new Date(selectedIncidente.fecha_fin).toLocaleString('es-AR')}
+                    </Text>
+                  </View>
+                )}
               </View>
 
               {/* Incidentes relacionados por un operador */}
@@ -4082,6 +4868,31 @@ export default function App() {
                 );
               })()}
 
+              {/* Revisión del caso: reaperturas, notas de seguimiento y cierres de revisión */}
+              {(() => {
+                const entradas = extraerRevision(notasDeIncidente(selectedIncidente));
+                if (entradas.length === 0) return null;
+                return (
+                  <View style={[styles.drawerInfoBlock, { backgroundColor: colors.bg.base, borderColor: colors.border.default, gap: 8 }]}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <FileText size={15} color={colors.semantic.warning} />
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: colors.text.primary }}>
+                        Revisión del caso ({entradas.length})
+                      </Text>
+                    </View>
+                    {entradas.map((entrada, indice) => (
+                      <View key={`${entrada.fecha}-${indice}`} style={{ paddingTop: 8, borderTopWidth: 1, borderTopColor: colors.border.default, gap: 2 }}>
+                        <Text style={{ fontSize: 12, fontWeight: '600', color: entrada.tipo === 'Seguimiento' ? colors.text.primary : colors.semantic.warning }}>
+                          {entrada.tipo} • {new Date(entrada.fecha).toLocaleString('es-AR')}
+                        </Text>
+                        <Text style={{ fontSize: 11, color: colors.text.secondary }}>Por {entrada.operador}</Text>
+                        <Text style={{ fontSize: 11, color: colors.text.secondary }}>{entrada.texto}</Text>
+                      </View>
+                    ))}
+                  </View>
+                );
+              })()}
+
               {/* Botones Operativos de Acción */}
               <View style={styles.drawerActions}>
                 {puede('evidencia.auditar') && (
@@ -4105,22 +4916,47 @@ export default function App() {
                   </TouchableOpacity>
                 )}
 
-                {!puede('incidente.actualizar') ? null : selectedIncidente.estado === 'en_curso' ? (
+                {puede('incidente.actualizar') && selectedIncidente.estado === 'en_curso' && (
                   <TouchableOpacity
                     style={[styles.actionBtn, { backgroundColor: colors.semantic.success }]}
-                    onPress={() => handleCambiarEstado(selectedIncidente, 'cerrado')}
+                    onPress={() => {
+                      setCierreIncidente(selectedIncidente);
+                      setCierreMotivo(MOTIVOS_CIERRE[0].valor);
+                      setCierreDetalle('');
+                    }}
                   >
                     <CheckCircle2 size={15} color="#FFFFFF" style={{ marginRight: 6 }} />
                     <Text style={styles.actionBtnText}>Finalizar y Marcar Cerrado</Text>
                   </TouchableOpacity>
-                ) : (
+                )}
+
+                {/* Revisión de un caso cerrado: no reactiva la emergencia */}
+                {puede('incidente.actualizar') && selectedIncidente.estado !== 'en_curso' && !casoEnRevision && (
                   <TouchableOpacity
                     style={[styles.actionBtn, { backgroundColor: colors.bg.overlay }]}
-                    onPress={() => handleCambiarEstado(selectedIncidente, 'en_curso')}
+                    onPress={() => abrirAccionRevision('reabrir')}
                   >
                     <RefreshCw size={15} color={colors.text.primary} style={{ marginRight: 6 }} />
                     <Text style={[styles.actionBtnText, { color: colors.text.primary }]}>Reabrir Caso</Text>
                   </TouchableOpacity>
+                )}
+                {puede('incidente.actualizar') && selectedIncidente.estado !== 'en_curso' && casoEnRevision && (
+                  <>
+                    <TouchableOpacity
+                      style={[styles.actionBtn, { backgroundColor: colors.bg.overlay }]}
+                      onPress={() => abrirAccionRevision('seguimiento')}
+                    >
+                      <Pencil size={15} color={colors.text.primary} style={{ marginRight: 6 }} />
+                      <Text style={[styles.actionBtnText, { color: colors.text.primary }]}>Agregar Nota de Seguimiento</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.actionBtn, { backgroundColor: colors.semantic.success }]}
+                      onPress={() => abrirAccionRevision('cerrar_revision')}
+                    >
+                      <CheckCircle2 size={15} color="#FFFFFF" style={{ marginRight: 6 }} />
+                      <Text style={styles.actionBtnText}>Cerrar Revisión</Text>
+                    </TouchableOpacity>
+                  </>
                 )}
               </View>
             </View>
@@ -4139,7 +4975,8 @@ export default function App() {
         }}
       >
         <View style={styles.modalBackdrop}>
-          <View style={[styles.auditCard, { backgroundColor: colors.bg.surface, borderColor: colors.border.default }]}>
+          {/* El alto se limita a la ventana: el encabezado, el aviso y la paginación quedan fijos y solo la lista se desplaza */}
+          <View style={[styles.auditCard, { backgroundColor: colors.bg.surface, borderColor: colors.border.default, maxHeight: '100%', flexDirection: 'column' }]}>
             <View style={[styles.auditHeader, { borderBottomColor: colors.border.default }]}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
                 <View style={[styles.auditIconBox, { backgroundColor: colors.semantic.infoBg }]}>
@@ -4275,7 +5112,7 @@ export default function App() {
                 </Text>
               </View>
             ) : (
-              <ScrollView style={{ maxHeight: 480, padding: spacing.md }}>
+              <ScrollView style={{ flexGrow: 0, flexShrink: 1, minHeight: 160 }} contentContainerStyle={{ padding: spacing.md }}>
                 {evidenciasAudit.map((ev, index) => {
                   const tieneConsentimientoIncidente = Boolean(
                     incidenteAuditadoConsentimiento.consentimiento_exportacion &&
@@ -4390,14 +5227,14 @@ export default function App() {
 
                       {/* Reproductor Forense HTML5 Integrado */}
                       {itemDesbloqueado && activeReproduciendoEvidenciaId === ev.id && renderReproductorForense(ev.tipo_archivo)}
-                  </View>
-                );
-              })}
+                    </View>
+                  );
+                })}
               </ScrollView>
             )}
 
             {/* Barra de Paginación de Evidencias (10 por página) */}
-            <View style={[styles.paginationBar, { borderTopColor: colors.border.default, backgroundColor: colors.bg.surface }]}>
+            <View style={[styles.paginationBar, { borderTopColor: colors.border.default, backgroundColor: colors.bg.surface, marginTop: 0, paddingHorizontal: spacing.md, flexShrink: 0 }]}>
               <TouchableOpacity
                 style={[styles.pageBtn, evidenciasPage <= 1 && { opacity: 0.3 }]}
                 disabled={evidenciasPage <= 1}
@@ -4440,6 +5277,403 @@ export default function App() {
         </View>
       </Modal>
 
+      {/* ── MODAL DE PERFIL INSTITUCIONAL Y CONFIGURACIÓN 2FA ── */}
+      <Modal visible={showProfileModal} transparent animationType="fade" onRequestClose={handleCerrarPerfilModal}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.adminModalCard, { backgroundColor: colors.bg.surface, borderColor: colors.border.default, maxWidth: 540 }]}>
+            {/* Header del Modal */}
+            <View style={[styles.adminModalHeader, { borderBottomColor: colors.border.default }]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <View style={[styles.auditIconBox, { backgroundColor: colors.semantic.infoBg }]}>
+                  <User size={22} color={colors.semantic.info} />
+                </View>
+                <View>
+                  <Text style={[styles.auditTitle, { color: colors.text.primary }]}>
+                    Mi Perfil Institucional
+                  </Text>
+                  <Text style={[styles.auditSubtitle, { color: colors.text.secondary }]}>
+                    Identidad operativa y seguridad de acceso
+                  </Text>
+                </View>
+              </View>
+              <TouchableOpacity onPress={handleCerrarPerfilModal} style={styles.closeBtn}>
+                <X size={20} color={colors.text.secondary} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Contenido del Modal */}
+            <ScrollView style={{ padding: spacing.lg }}>
+              {/* Notificaciones de éxito o error */}
+              {profileMfaSuccess && (
+                <View style={[styles.alertSuccessBox, { backgroundColor: '#143823', borderColor: '#22C55E', marginBottom: spacing.md }]}>
+                  <CheckCircle2 size={16} color="#22C55E" style={{ marginRight: 8 }} />
+                  <Text style={{ color: '#86EFAC', fontWeight: '600', fontSize: 13, flex: 1 }}>{profileMfaSuccess}</Text>
+                </View>
+              )}
+
+              {profileMfaError && (
+                <View style={[styles.errorBox, { backgroundColor: colors.semantic.dangerBg, borderColor: colors.semantic.danger, marginBottom: spacing.md }]}>
+                  <AlertTriangle size={16} color={colors.semantic.danger} style={{ marginRight: 8 }} />
+                  <Text style={[styles.errorText, { color: colors.semantic.danger, flex: 1 }]}>{profileMfaError}</Text>
+                </View>
+              )}
+
+              {/* TARJETA 1: DATOS DEL PERFIL DEL OPERADOR */}
+              <View style={[{ backgroundColor: colors.bg.base, borderColor: colors.border.default, borderWidth: 1, borderRadius: radii.md, padding: spacing.md, marginBottom: spacing.md }]}>
+                {/* Nombre de la persona y badge de estado */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+                  <Text style={{ fontSize: 16, fontWeight: '700', color: colors.text.primary }}>
+                    {profileUserData?.nombre
+                      ? `${profileUserData.nombre} ${profileUserData.apellido || ''}`
+                      : session?.user?.user_metadata?.nombre
+                        ? `${session.user.user_metadata.nombre} ${session.user.user_metadata.apellido || ''}`
+                        : 'Operador Institucional'}
+                  </Text>
+                  <View
+                    style={[
+                      styles.userStatusTag,
+                      {
+                        backgroundColor: '#143823',
+                        borderColor: '#22C55E',
+                        flexShrink: 0,
+                      },
+                    ]}
+                  >
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: '#86EFAC' }}>
+                      Activo
+                    </Text>
+                  </View>
+                </View>
+
+                {/* Perfil/es: con medallas de cada perfil asignado */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginVertical: 4 }}>
+                  <Text style={{ fontSize: 12, fontWeight: '700', color: colors.text.secondary, marginRight: 2 }}>
+                    Perfil/es:
+                  </Text>
+                  {(profileUserData?.roles && profileUserData.roles.length > 0
+                    ? profileUserData.roles
+                    : session?.roles && session.roles.length > 0
+                      ? session.roles
+                      : [userRole || 'Operador']
+                  ).map((roleLabel: string) => {
+                    const isAdm = roleLabel === 'Administrador';
+                    const isAut = roleLabel === 'Autoridad';
+                    const isCiv = roleLabel === 'Civil';
+                    return (
+                      <View
+                        key={roleLabel}
+                        style={[
+                          styles.userRoleTag,
+                          {
+                            backgroundColor: isAdm
+                              ? '#3B1D4A'
+                              : isAut
+                                ? colors.semantic.infoBg
+                                : isCiv
+                                  ? '#1E293B'
+                                  : colors.bg.surface,
+                            borderColor: isAdm
+                              ? '#A855F7'
+                              : isAut
+                                ? colors.semantic.info
+                                : isCiv
+                                  ? '#475569'
+                                  : colors.border.default,
+                            borderWidth: 1,
+                            paddingHorizontal: 8,
+                            paddingVertical: 2,
+                            borderRadius: 6,
+                          },
+                        ]}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 11,
+                            fontWeight: '700',
+                            color: isAdm
+                              ? '#E9D5FF'
+                              : isAut
+                                ? colors.semantic.info
+                                : isCiv
+                                  ? '#94A3B8'
+                                  : colors.text.primary,
+                          }}
+                        >
+                          {roleLabel}
+                        </Text>
+                      </View>
+                    );
+                  })}
+                </View>
+
+                {/* Grilla ordenada de chips de datos personales (idénticos al diseño del sistema + Dirección) */}
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10, alignItems: 'center' }}>
+                  {/* Chip DNI */}
+                  <View style={[styles.personalDataChip, { backgroundColor: colors.bg.surface, borderColor: colors.border.default }]}>
+                    <CreditCard size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
+                    <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                      DNI: <Text style={{ color: colors.text.primary, fontWeight: '600' }}>{profileUserData?.dni || 'Sin DNI'}</Text>
+                    </Text>
+                  </View>
+
+                  {/* Chip Correo */}
+                  <View style={[styles.personalDataChip, { backgroundColor: colors.bg.surface, borderColor: colors.border.default }]}>
+                    <Mail size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
+                    <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                      {profileUserData?.email || session?.user?.email || 'operador@apoyar.gob.ar'}
+                    </Text>
+                  </View>
+
+                  {/* Chip Teléfono */}
+                  {profileUserData?.telefono && (
+                    <View style={[styles.personalDataChip, { backgroundColor: colors.bg.surface, borderColor: colors.border.default }]}>
+                      <Phone size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
+                      <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                        {profileUserData.telefono}
+                      </Text>
+                    </View>
+                  )}
+
+                  {/* Chip Nacimiento */}
+                  {profileUserData?.fecha_nacimiento && (
+                    <View style={[styles.personalDataChip, { backgroundColor: colors.bg.surface, borderColor: colors.border.default }]}>
+                      <Calendar size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
+                      <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                        Nac: {profileUserData.fecha_nacimiento}
+                      </Text>
+                    </View>
+                  )}
+
+                  {/* Chip Género */}
+                  {profileUserData?.genero && profileUserData.genero !== 'No especificado' && (
+                    <View style={[styles.personalDataChip, { backgroundColor: colors.bg.surface, borderColor: colors.border.default }]}>
+                      <User size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
+                      <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                        {profileUserData.genero}
+                      </Text>
+                    </View>
+                  )}
+
+                  {/* Chip Dirección */}
+                  <View style={[styles.personalDataChip, { backgroundColor: colors.bg.surface, borderColor: colors.border.default }]}>
+                    <MapPin size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
+                    <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                      Dirección: <Text style={{ color: colors.text.primary, fontWeight: '600' }}>{profileUserData?.direccion || 'Sin dirección declarada'}</Text>
+                    </Text>
+                  </View>
+                </View>
+              </View>
+
+              {/* TARJETA 2: AUTENTICACIÓN EN DOS PASOS (2FA TOTP) */}
+              <View style={[{ backgroundColor: colors.bg.base, borderColor: colors.border.default, borderWidth: 1, borderRadius: radii.md, padding: spacing.md }]}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing.xs }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <ShieldCheck size={18} color={colors.semantic.info} />
+                    <Text style={{ fontSize: 14, fontWeight: '700', color: colors.text.primary }}>
+                      Verificación en dos pasos (2FA)
+                    </Text>
+                  </View>
+
+                  {profileMfaStatus?.hasMfa ? (
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: colors.semantic.successBg, paddingHorizontal: 8, paddingVertical: 2, borderRadius: radii.full }}>
+                      <CheckCircle2 size={12} color={colors.semantic.success} />
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: colors.semantic.success }}>Activada</Text>
+                    </View>
+                  ) : (
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: colors.semantic.warningBg, paddingHorizontal: 8, paddingVertical: 2, borderRadius: radii.full }}>
+                      <AlertTriangle size={12} color={colors.semantic.warning} />
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: colors.semantic.warning }}>Desactivada</Text>
+                    </View>
+                  )}
+                </View>
+
+                <Text style={{ fontSize: 12, color: colors.text.secondary, lineHeight: 18, marginVertical: spacing.xs }}>
+                  {profileMfaStatus?.hasMfa
+                    ? 'Tu cuenta está protegida. Al iniciar sesión en el panel web o en la app móvil, se te solicitará el código de 6 dígitos generado por tu aplicación autenticadora (Google Authenticator).'
+                    : 'Añadí una capa extra de protección a tu cuenta vinculando Google Authenticator, Authy o Microsoft Authenticator con un código de 6 dígitos.'}
+                </Text>
+
+                {profileMfaLoading ? (
+                  <View style={{ padding: spacing.md, alignItems: 'center' }}>
+                    <ActivityIndicator color={colors.semantic.info} />
+                  </View>
+                ) : profileMfaStatus?.hasMfa ? (
+                  /* ESTADO: 2FA ACTIVADA -> Opción de Desactivar */
+                  <View style={{ marginTop: spacing.sm }}>
+                    {profileConfirmingDisable ? (
+                      <View style={{ backgroundColor: colors.semantic.dangerBg, padding: spacing.md, borderRadius: radii.sm, borderWidth: 1, borderColor: colors.semantic.danger }}>
+                        <Text style={{ fontSize: 12, color: colors.semantic.danger, fontWeight: '600', marginBottom: spacing.sm }}>
+                          ¿Estás seguro de que deseás desactivar la verificación en dos pasos? Tu cuenta solo requerirá contraseña para ingresar.
+                        </Text>
+                        <View style={{ flexDirection: 'row', gap: 8, justifyContent: 'flex-end' }}>
+                          <TouchableOpacity
+                            style={[styles.secondaryModalBtn, { borderColor: colors.border.default, paddingVertical: 6, paddingHorizontal: 12 }]}
+                            onPress={() => setProfileConfirmingDisable(false)}
+                          >
+                            <Text style={{ color: colors.text.primary, fontSize: 12, fontWeight: '600' }}>Cancelar</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={[styles.primaryModalBtn, { backgroundColor: colors.semantic.danger, paddingVertical: 6, paddingHorizontal: 12 }]}
+                            onPress={handleDesactivarMfa}
+                          >
+                            <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: '700' }}>Sí, Desactivar 2FA</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    ) : (
+                      <TouchableOpacity
+                        style={[styles.secondaryModalBtn, { borderColor: colors.semantic.danger, alignSelf: 'flex-start', paddingVertical: 8, paddingHorizontal: 14 }]}
+                        onPress={() => setProfileConfirmingDisable(true)}
+                      >
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                          <ShieldAlert size={14} color={colors.semantic.danger} />
+                          <Text style={{ color: colors.semantic.danger, fontWeight: '700', fontSize: 12 }}>
+                            Desactivar Verificación en dos pasos
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                ) : (
+                  /* ESTADO: 2FA DESACTIVADA -> Opción de Iniciar Activación */
+                  <View style={{ marginTop: spacing.sm }}>
+                    {!profileMfaEnrolling ? (
+                      <TouchableOpacity
+                        style={[styles.primaryModalBtn, { backgroundColor: colors.semantic.info, alignSelf: 'flex-start', paddingVertical: 8, paddingHorizontal: 16 }]}
+                        onPress={handleIniciarEnrollMfa}
+                      >
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                          <ShieldCheck size={16} color="#FFFFFF" />
+                          <Text style={{ color: '#FFFFFF', fontWeight: '700', fontSize: 13 }}>
+                            Activar Verificación en dos pasos
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    ) : (
+                      /* PASO A PASO DE VINCULACIÓN TOTP (QR + Código) */
+                      <View style={{ backgroundColor: colors.bg.elevated, padding: spacing.md, borderRadius: radii.sm, borderWidth: 1, borderColor: colors.semantic.info, gap: spacing.sm }}>
+                        <Text style={{ fontSize: 12, fontWeight: '700', color: colors.text.primary }}>
+                          1. Escaneá este código QR con Google Authenticator:
+                        </Text>
+
+                        {renderedQrCode && (
+                          <View style={{ alignSelf: 'center', padding: 8, backgroundColor: '#FFFFFF', borderRadius: 8, alignItems: 'center', justifyContent: 'center' }}>
+                            {typeof document !== 'undefined' ? (
+                              <div
+                                style={{ width: 160, height: 160, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                                dangerouslySetInnerHTML={{ __html: renderedQrCode.svgMarkup }}
+                              />
+                            ) : (
+                              <Image
+                                source={{ uri: renderedQrCode.base64Uri }}
+                                style={{ width: 160, height: 160 }}
+                                resizeMode="contain"
+                              />
+                            )}
+                          </View>
+                        )}
+
+                        <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                          O ingresá la clave secreta manualmente en tu app:
+                        </Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: colors.bg.base, padding: 8, borderRadius: radii.sm, borderWidth: 1, borderColor: colors.border.default }}>
+                          <Text style={{ fontFamily: 'monospace', fontWeight: '700', fontSize: 12, color: colors.text.primary, letterSpacing: 1 }} numberOfLines={1}>
+                            {profileMfaEnrollData?.secret}
+                          </Text>
+                          <TouchableOpacity
+                            style={{ backgroundColor: colors.bg.elevated, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4, borderWidth: 1, borderColor: colors.border.default }}
+                            onPress={() => {
+                              if (profileMfaEnrollData?.secret && typeof navigator !== 'undefined' && navigator.clipboard) {
+                                navigator.clipboard.writeText(profileMfaEnrollData.secret);
+                                showToast('Copiado', 'Clave secreta copiada al portapapeles', 'success');
+                              }
+                            }}
+                          >
+                            <Text style={{ fontSize: 11, fontWeight: '700', color: colors.semantic.info }}>Copiar</Text>
+                          </TouchableOpacity>
+                        </View>
+
+                        <Text style={{ fontSize: 12, fontWeight: '700', color: colors.text.primary, marginTop: 4 }}>
+                          2. Ingresá el código de 6 dígitos que muestra tu app:
+                        </Text>
+                        <TextInput
+                          style={[
+                            styles.modalInput,
+                            {
+                              backgroundColor: colors.bg.base,
+                              borderColor: colors.border.default,
+                              color: colors.text.primary,
+                              textAlign: 'center',
+                              fontSize: 20,
+                              fontWeight: '700',
+                              letterSpacing: 4,
+                            },
+                          ]}
+                          placeholder="000000"
+                          placeholderTextColor={colors.text.disabled}
+                          value={profileMfaCode}
+                          onChangeText={(v) => {
+                            setProfileMfaCode(v.replace(/\D/g, '').slice(0, 6));
+                            if (profileMfaError) setProfileMfaError(null);
+                          }}
+                          keyboardType="number-pad"
+                          maxLength={6}
+                          returnKeyType="done"
+                          onSubmitEditing={handleConfirmarEnrollMfa}
+                          onKeyPress={(e: any) => {
+                            if (e.nativeEvent?.key === 'Enter' || e.key === 'Enter') {
+                              handleConfirmarEnrollMfa();
+                            }
+                          }}
+                        />
+
+                        <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
+                          <TouchableOpacity
+                            style={[styles.secondaryModalBtn, { borderColor: colors.border.default, paddingVertical: 6, paddingHorizontal: 12 }]}
+                            onPress={() => {
+                              if (profileMfaEnrollData?.factorId) {
+                                unenrollTotpAsync(profileMfaEnrollData.factorId).catch(() => {});
+                              }
+                              setProfileMfaEnrolling(false);
+                              setProfileMfaEnrollData(null);
+                              setProfileMfaCode('');
+                              setProfileMfaError(null);
+                            }}
+                          >
+                            <Text style={{ color: colors.text.primary, fontSize: 12, fontWeight: '600' }}>Cancelar</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={[
+                              styles.primaryModalBtn,
+                              { backgroundColor: colors.semantic.info, paddingVertical: 6, paddingHorizontal: 14 },
+                              profileMfaCode.length !== 6 && { opacity: 0.5 },
+                            ]}
+                            disabled={profileMfaCode.length !== 6 || profileMfaLoading}
+                            onPress={handleConfirmarEnrollMfa}
+                          >
+                            <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: '700' }}>Confirmar y Activar</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    )}
+                  </View>
+                )}
+              </View>
+            </ScrollView>
+
+            {/* Footer con botón de Cerrar */}
+            <View style={{ borderTopWidth: 1, borderTopColor: colors.border.default, flexDirection: 'row', justifyContent: 'flex-end', padding: spacing.md }}>
+              <TouchableOpacity
+                style={[styles.secondaryModalBtn, { borderColor: colors.border.default, paddingVertical: 8, paddingHorizontal: 16 }]}
+                onPress={handleCerrarPerfilModal}
+              >
+                <Text style={{ color: colors.text.primary, fontWeight: '600', fontSize: 13 }}>Cerrar</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       {/* ── MODAL DE GESTIÓN DE OPERADORES Y AUTORIDADES (CU-09 / RBAC) ── */}
       <Modal visible={showUsersModal} transparent animationType="fade" onRequestClose={() => setShowUsersModal(false)}>
         <View style={styles.modalOverlay}>
@@ -4455,7 +5689,7 @@ export default function App() {
                     Gestión Institucional de Operadores
                   </Text>
                   <Text style={[styles.auditSubtitle, { color: colors.text.secondary }]}>
-                    Control de cuentas y perfiles Autoridad / Administrador
+                    Control de cuentas y perfiles
                   </Text>
                 </View>
               </View>
@@ -4624,276 +5858,276 @@ export default function App() {
                         );
                       })
                       .map((usr) => {
-                      const userRoles: string[] = usr.roles && usr.roles.length > 0 ? usr.roles : [usr.rol || 'Operador'];
-                      const isCurrentUser = usr.usuario_id === session?.user?.id;
-                      const hasAutoridad = userRoles.includes('Autoridad');
-                      const hasAdmin = userRoles.includes('Administrador');
+                        const userRoles: string[] = usr.roles && usr.roles.length > 0 ? usr.roles : [usr.rol || 'Operador'];
+                        const isCurrentUser = usr.usuario_id === session?.user?.id;
+                        const hasAutoridad = userRoles.includes('Autoridad');
+                        const hasAdmin = userRoles.includes('Administrador');
 
-                      return (
-                        <View
-                          key={usr.usuario_id}
-                          style={[
-                            styles.userRowCard,
-                            {
-                              backgroundColor: colors.bg.elevated,
-                              borderColor: colors.border.default,
-                            },
-                          ]}
-                        >
-                          {/* ── COLUMNA IZQUIERDA: INFORMACIÓN ── */}
-                          <View style={{ flex: 1, minWidth: 0 }}>
-                            {/* Fila 1 (Header): Nombre del operador + Badges (Autoridad / Admin + Activo) siempre en la misma línea */}
-                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'nowrap', marginBottom: 8 }}>
-                              <Text
-                                style={[styles.userNameText, { color: colors.text.primary }]}
-                                numberOfLines={1}
-                              >
-                                {usr.nombre} {usr.apellido}
-                              </Text>
+                        return (
+                          <View
+                            key={usr.usuario_id}
+                            style={[
+                              styles.userRowCard,
+                              {
+                                backgroundColor: colors.bg.elevated,
+                                borderColor: colors.border.default,
+                              },
+                            ]}
+                          >
+                            {/* ── COLUMNA IZQUIERDA: INFORMACIÓN ── */}
+                            <View style={{ flex: 1, minWidth: 0 }}>
+                              {/* Fila 1 (Header): Nombre del operador + Badges (Autoridad / Admin + Activo) siempre en la misma línea */}
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'nowrap', marginBottom: 8 }}>
+                                <Text
+                                  style={[styles.userNameText, { color: colors.text.primary }]}
+                                  numberOfLines={1}
+                                >
+                                  {usr.nombre} {usr.apellido}
+                                </Text>
 
-                              {/* Badges de Roles Institucionales y Civiles */}
-                              {userRoles.map((r: string) => {
-                                const isCivil = r === 'Víctima' || r === 'Civil';
-                                const roleLabel = isCivil ? 'Civil' : r;
-                                const isAdm = r === 'Administrador';
-                                const isAut = r === 'Autoridad';
-                                return (
-                                  <View
-                                    key={r}
-                                    style={[
-                                      styles.userRoleTag,
-                                      {
-                                        backgroundColor: isAdm ? '#3B1D4A' : isAut ? '#1E3A5F' : '#1E293B',
-                                        borderColor: isAdm ? '#A855F7' : isAut ? '#3B82F6' : '#64748B',
-                                        flexShrink: 0,
-                                      },
-                                    ]}
-                                  >
-                                    <Text
-                                      style={{
-                                        fontSize: 11,
-                                        fontWeight: '700',
-                                        color: isAdm ? '#E9D5FF' : isAut ? '#BFDBFE' : '#94A3B8',
-                                      }}
+                                {/* Badges de Roles Institucionales y Civiles */}
+                                {userRoles.map((r: string) => {
+                                  const isCivil = r === 'Víctima' || r === 'Civil';
+                                  const roleLabel = isCivil ? 'Civil' : r;
+                                  const isAdm = r === 'Administrador';
+                                  const isAut = r === 'Autoridad';
+                                  return (
+                                    <View
+                                      key={r}
+                                      style={[
+                                        styles.userRoleTag,
+                                        {
+                                          backgroundColor: isAdm ? '#3B1D4A' : isAut ? '#1E3A5F' : '#1E293B',
+                                          borderColor: isAdm ? '#A855F7' : isAut ? '#3B82F6' : '#64748B',
+                                          flexShrink: 0,
+                                        },
+                                      ]}
                                     >
-                                      {roleLabel}
+                                      <Text
+                                        style={{
+                                          fontSize: 11,
+                                          fontWeight: '700',
+                                          color: isAdm ? '#E9D5FF' : isAut ? '#BFDBFE' : '#94A3B8',
+                                        }}
+                                      >
+                                        {roleLabel}
+                                      </Text>
+                                    </View>
+                                  );
+                                })}
+
+                                {/* Insignia Limpia de Estado (Activo) */}
+                                <View
+                                  style={[
+                                    styles.userStatusTag,
+                                    {
+                                      backgroundColor: '#143823',
+                                      borderColor: '#22C55E',
+                                      flexShrink: 0,
+                                    },
+                                  ]}
+                                >
+                                  <Text
+                                    style={{
+                                      fontSize: 11,
+                                      fontWeight: '700',
+                                      color: '#86EFAC',
+                                    }}
+                                  >
+                                    Activo
+                                  </Text>
+                                </View>
+                              </View>
+
+                              {/* Fila 2 (Datos personales): Grilla ordenada de chips con íconos claros */}
+                              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 8, alignItems: 'center' }}>
+                                <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
+                                  <CreditCard size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
+                                  <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                                    DNI: <Text style={{ color: colors.text.primary, fontWeight: '600' }}>{usr.dni || 'Sin DNI'}</Text>
+                                  </Text>
+                                </View>
+
+                                <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
+                                  <Mail size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
+                                  <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                                    {usr.email}
+                                  </Text>
+                                </View>
+
+                                {usr.telefono ? (
+                                  <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
+                                    <Phone size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
+                                    <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                                      {usr.telefono}
                                     </Text>
                                   </View>
-                                );
-                              })}
+                                ) : null}
 
-                              {/* Insignia Limpia de Estado (Activo) */}
-                              <View
-                                style={[
-                                  styles.userStatusTag,
-                                  {
-                                    backgroundColor: '#143823',
-                                    borderColor: '#22C55E',
-                                    flexShrink: 0,
-                                  },
-                                ]}
-                              >
-                                <Text
-                                  style={{
-                                    fontSize: 11,
-                                    fontWeight: '700',
-                                    color: '#86EFAC',
-                                  }}
+                                {usr.fecha_nacimiento ? (
+                                  <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
+                                    <Calendar size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
+                                    <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                                      Nac: {usr.fecha_nacimiento}
+                                    </Text>
+                                  </View>
+                                ) : null}
+
+                                {usr.genero && usr.genero !== 'No especificado' ? (
+                                  <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
+                                    <User size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
+                                    <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                                      {usr.genero}
+                                    </Text>
+                                  </View>
+                                ) : null}
+                              </View>
+
+                              {/* Fila 3 (Caja Institucional): Ícono a la izquierda, título y subtítulo apilados a la derecha */}
+                              {hasAutoridad ? (
+                                <View
+                                  style={[
+                                    styles.institutionalBoxClean,
+                                    {
+                                      backgroundColor: colors.bg.base,
+                                      borderColor: colors.border.default,
+                                    },
+                                  ]}
                                 >
-                                  Activo
-                                </Text>
-                              </View>
-                            </View>
-
-                            {/* Fila 2 (Datos personales): Grilla ordenada de chips con íconos claros */}
-                            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 8, alignItems: 'center' }}>
-                              <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
-                                <CreditCard size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
-                                <Text style={{ fontSize: 11, color: colors.text.secondary }}>
-                                  DNI: <Text style={{ color: colors.text.primary, fontWeight: '600' }}>{usr.dni || 'Sin DNI'}</Text>
-                                </Text>
-                              </View>
-
-                              <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
-                                <Mail size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
-                                <Text style={{ fontSize: 11, color: colors.text.secondary }}>
-                                  {usr.email}
-                                </Text>
-                              </View>
-
-                              {usr.telefono ? (
-                                <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
-                                  <Phone size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
-                                  <Text style={{ fontSize: 11, color: colors.text.secondary }}>
-                                    {usr.telefono}
-                                  </Text>
+                                  <View style={[styles.institutionalIconContainer, { backgroundColor: isDark ? 'rgba(59, 130, 246, 0.15)' : '#EFF6FF' }]}>
+                                    <Building size={16} color="#3B82F6" />
+                                  </View>
+                                  <View style={{ flex: 1, minWidth: 0 }}>
+                                    <Text style={{ fontSize: 12, fontWeight: '700', color: colors.text.primary }} numberOfLines={1}>
+                                      {usr.institucion || 'Policía de la Provincia de Formosa'}
+                                      {usr.dependencia ? ` • ${usr.dependencia}` : ''}
+                                    </Text>
+                                    <Text style={{ fontSize: 11, color: colors.text.secondary, marginTop: 1 }} numberOfLines={1}>
+                                      {usr.cargo || 'Oficial Operativo'}
+                                      {usr.legajo ? ` (Legajo: ${usr.legajo})` : ''}
+                                      {usr.sede ? ` • Sede: ${usr.sede}` : ''}
+                                    </Text>
+                                  </View>
                                 </View>
-                              ) : null}
-
-                              {usr.fecha_nacimiento ? (
-                                <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
-                                  <Calendar size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
-                                  <Text style={{ fontSize: 11, color: colors.text.secondary }}>
-                                    Nac: {usr.fecha_nacimiento}
-                                  </Text>
+                              ) : (
+                                <View
+                                  style={[
+                                    styles.institutionalBoxClean,
+                                    {
+                                      backgroundColor: isDark ? '#261233' : '#FAF5FF',
+                                      borderColor: isDark ? '#A855F7' : '#E9D5FF',
+                                    },
+                                  ]}
+                                >
+                                  <View style={[styles.institutionalIconContainer, { backgroundColor: isDark ? '#3B1D4A' : '#F3E8FF' }]}>
+                                    <Shield size={16} color="#A855F7" />
+                                  </View>
+                                  <View style={{ flex: 1, minWidth: 0 }}>
+                                    <Text style={{ fontSize: 12, fontWeight: '700', color: isDark ? '#E9D5FF' : '#6B21A8' }} numberOfLines={1}>
+                                      Administrador Global del Sistema
+                                    </Text>
+                                    <Text style={{ fontSize: 11, color: isDark ? '#C084FC' : '#9333EA', marginTop: 1 }} numberOfLines={1}>
+                                      Gestión institucional y configuración centralizada
+                                    </Text>
+                                  </View>
                                 </View>
-                              ) : null}
+                              )}
 
-                              {usr.genero && usr.genero !== 'No especificado' ? (
-                                <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
-                                  <User size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
-                                  <Text style={{ fontSize: 11, color: colors.text.secondary }}>
-                                    {usr.genero}
-                                  </Text>
-                                </View>
+                              {usr.notas ? (
+                                <Text style={[styles.userDescText, { color: colors.semantic.info, marginTop: 4 }]}>
+                                  {usr.notas}
+                                </Text>
                               ) : null}
                             </View>
 
-                            {/* Fila 3 (Caja Institucional): Ícono a la izquierda, título y subtítulo apilados a la derecha */}
-                            {hasAutoridad ? (
-                              <View
-                                style={[
-                                  styles.institutionalBoxClean,
-                                  {
-                                    backgroundColor: colors.bg.base,
-                                    borderColor: colors.border.default,
-                                  },
-                                ]}
-                              >
-                                <View style={[styles.institutionalIconContainer, { backgroundColor: isDark ? 'rgba(59, 130, 246, 0.15)' : '#EFF6FF' }]}>
-                                  <Building size={16} color="#3B82F6" />
-                                </View>
-                                <View style={{ flex: 1, minWidth: 0 }}>
-                                  <Text style={{ fontSize: 12, fontWeight: '700', color: colors.text.primary }} numberOfLines={1}>
-                                    {usr.institucion || 'Policía de la Provincia de Formosa'}
-                                    {usr.dependencia ? ` • ${usr.dependencia}` : ''}
-                                  </Text>
-                                  <Text style={{ fontSize: 11, color: colors.text.secondary, marginTop: 1 }} numberOfLines={1}>
-                                    {usr.cargo || 'Oficial Operativo'}
-                                    {usr.legajo ? ` (Legajo: ${usr.legajo})` : ''}
-                                    {usr.sede ? ` • Sede: ${usr.sede}` : ''}
-                                  </Text>
-                                </View>
-                              </View>
-                            ) : (
-                              <View
-                                style={[
-                                  styles.institutionalBoxClean,
-                                  {
-                                    backgroundColor: isDark ? '#261233' : '#FAF5FF',
-                                    borderColor: isDark ? '#A855F7' : '#E9D5FF',
-                                  },
-                                ]}
-                              >
-                                <View style={[styles.institutionalIconContainer, { backgroundColor: isDark ? '#3B1D4A' : '#F3E8FF' }]}>
-                                  <Shield size={16} color="#A855F7" />
-                                </View>
-                                <View style={{ flex: 1, minWidth: 0 }}>
-                                  <Text style={{ fontSize: 12, fontWeight: '700', color: isDark ? '#E9D5FF' : '#6B21A8' }} numberOfLines={1}>
-                                    Administrador Global del Sistema
-                                  </Text>
-                                  <Text style={{ fontSize: 11, color: isDark ? '#C084FC' : '#9333EA', marginTop: 1 }} numberOfLines={1}>
-                                    Gestión institucional y configuración centralizada
-                                  </Text>
-                                </View>
-                              </View>
-                            )}
+                            {/* ── COLUMNA DERECHA: ACCIONES COMPACTAS ── */}
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0, alignSelf: 'flex-start' }}>
 
-                            {usr.notas ? (
-                              <Text style={[styles.userDescText, { color: colors.semantic.info, marginTop: 4 }]}>
-                                {usr.notas}
-                              </Text>
-                            ) : null}
+                              {/* Editar Operador Institucional */}
+                              <TouchableOpacity
+                                style={[
+                                  styles.userActionBtnClean,
+                                  {
+                                    backgroundColor: isDark ? '#1C2E3D' : '#EFF6FF',
+                                    borderColor: colors.semantic.info,
+                                  },
+                                ]}
+                                onPress={() => handleAbrirEditarOperador(usr)}
+                                accessibilityLabel="Editar Operador Institucional"
+                              >
+                                <Pencil size={13} color={colors.semantic.info} style={{ marginRight: 4 }} />
+                                <Text style={{ fontSize: 12, fontWeight: '600', color: colors.semantic.info }}>
+                                  Editar
+                                </Text>
+                              </TouchableOpacity>
+
+                              {/* Agregar rol Administrador si solo es Autoridad */}
+                              {!hasAdmin && (
+                                <TouchableOpacity
+                                  style={[
+                                    styles.userActionBtnClean,
+                                    {
+                                      backgroundColor: isDark ? '#261233' : '#FAF5FF',
+                                      borderColor: isDark ? '#A855F7' : '#D8B4FE',
+                                    },
+                                  ]}
+                                  onPress={() => handleAgregarRolAdmin(usr)}
+                                  accessibilityLabel="Agregar rol Administrador"
+                                >
+                                  <Shield size={13} color={isDark ? '#C084FC' : '#9333EA'} style={{ marginRight: 4 }} />
+                                  <Text style={{ fontSize: 12, fontWeight: '600', color: isDark ? '#E9D5FF' : '#7E22CE' }}>
+                                    + Rol Admin
+                                  </Text>
+                                </TouchableOpacity>
+                              )}
+
+                              {/* Agregar rol Autoridad si solo es Administrador */}
+                              {!hasAutoridad && (
+                                <TouchableOpacity
+                                  style={[
+                                    styles.userActionBtnClean,
+                                    {
+                                      backgroundColor: isDark ? '#102A45' : '#EFF6FF',
+                                      borderColor: isDark ? '#3B82F6' : '#93C5FD',
+                                    },
+                                  ]}
+                                  onPress={() => {
+                                    setTargetAddRoleUser(usr);
+                                    setAddAutoridadLegajo('');
+                                    setShowAddAutoridadModal(true);
+                                  }}
+                                  accessibilityLabel="Agregar rol Autoridad"
+                                >
+                                  <Building size={13} color={isDark ? '#60A5FA' : '#2563EB'} style={{ marginRight: 4 }} />
+                                  <Text style={{ fontSize: 12, fontWeight: '600', color: isDark ? '#BFDBFE' : '#1D4ED8' }}>
+                                    + Rol Autoridad
+                                  </Text>
+                                </TouchableOpacity>
+                              )}
+
+                              {/* Único botón de acción de estado: Suspender Operador */}
+                              {!isCurrentUser && (
+                                <TouchableOpacity
+                                  style={[
+                                    styles.userActionBtnClean,
+                                    {
+                                      backgroundColor: colors.semantic.dangerBg,
+                                      borderColor: colors.semantic.danger,
+                                    },
+                                  ]}
+                                  onPress={() => handleConfirmarSuspension(usr)}
+                                  accessibilityLabel="Suspender Operador Institucional"
+                                >
+                                  <UserX size={13} color={colors.semantic.danger} style={{ marginRight: 4 }} />
+                                  <Text style={{ fontSize: 12, fontWeight: '600', color: colors.semantic.danger }}>
+                                    Suspender
+                                  </Text>
+                                </TouchableOpacity>
+                              )}
+                            </View>
                           </View>
-
-                          {/* ── COLUMNA DERECHA: ACCIONES COMPACTAS ── */}
-                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0, alignSelf: 'flex-start' }}>
-
-                            {/* Editar Operador Institucional */}
-                            <TouchableOpacity
-                              style={[
-                                styles.userActionBtnClean,
-                                {
-                                  backgroundColor: isDark ? '#1C2E3D' : '#EFF6FF',
-                                  borderColor: colors.semantic.info,
-                                },
-                              ]}
-                              onPress={() => handleAbrirEditarOperador(usr)}
-                              accessibilityLabel="Editar Operador Institucional"
-                            >
-                              <Pencil size={13} color={colors.semantic.info} style={{ marginRight: 4 }} />
-                              <Text style={{ fontSize: 12, fontWeight: '600', color: colors.semantic.info }}>
-                                Editar
-                              </Text>
-                            </TouchableOpacity>
-
-                            {/* Agregar rol Administrador si solo es Autoridad */}
-                            {!hasAdmin && (
-                              <TouchableOpacity
-                                style={[
-                                  styles.userActionBtnClean,
-                                  {
-                                    backgroundColor: isDark ? '#261233' : '#FAF5FF',
-                                    borderColor: isDark ? '#A855F7' : '#D8B4FE',
-                                  },
-                                ]}
-                                onPress={() => handleAgregarRolAdmin(usr)}
-                                accessibilityLabel="Agregar rol Administrador"
-                              >
-                                <Shield size={13} color={isDark ? '#C084FC' : '#9333EA'} style={{ marginRight: 4 }} />
-                                <Text style={{ fontSize: 12, fontWeight: '600', color: isDark ? '#E9D5FF' : '#7E22CE' }}>
-                                  + Rol Admin
-                                </Text>
-                              </TouchableOpacity>
-                            )}
-
-                            {/* Agregar rol Autoridad si solo es Administrador */}
-                            {!hasAutoridad && (
-                              <TouchableOpacity
-                                style={[
-                                  styles.userActionBtnClean,
-                                  {
-                                    backgroundColor: isDark ? '#102A45' : '#EFF6FF',
-                                    borderColor: isDark ? '#3B82F6' : '#93C5FD',
-                                  },
-                                ]}
-                                onPress={() => {
-                                  setTargetAddRoleUser(usr);
-                                  setAddAutoridadLegajo('');
-                                  setShowAddAutoridadModal(true);
-                                }}
-                                accessibilityLabel="Agregar rol Autoridad"
-                              >
-                                <Building size={13} color={isDark ? '#60A5FA' : '#2563EB'} style={{ marginRight: 4 }} />
-                                <Text style={{ fontSize: 12, fontWeight: '600', color: isDark ? '#BFDBFE' : '#1D4ED8' }}>
-                                  + Rol Autoridad
-                                </Text>
-                              </TouchableOpacity>
-                            )}
-
-                            {/* Único botón de acción de estado: Suspender Operador */}
-                            {!isCurrentUser && (
-                              <TouchableOpacity
-                                style={[
-                                  styles.userActionBtnClean,
-                                  {
-                                    backgroundColor: colors.semantic.dangerBg,
-                                    borderColor: colors.semantic.danger,
-                                  },
-                                ]}
-                                onPress={() => handleConfirmarSuspension(usr)}
-                                accessibilityLabel="Suspender Operador Institucional"
-                              >
-                                <UserX size={13} color={colors.semantic.danger} style={{ marginRight: 4 }} />
-                                <Text style={{ fontSize: 12, fontWeight: '600', color: colors.semantic.danger }}>
-                                  Suspender
-                                </Text>
-                              </TouchableOpacity>
-                            )}
-                          </View>
-                        </View>
-                      );
-                    })}
+                        );
+                      })}
 
                     {/* Barra de Paginación de 10 en 10 */}
                     <View style={styles.paginationBar}>
@@ -4963,204 +6197,204 @@ export default function App() {
                         );
                       })
                       .map((usr) => {
-                      const userRoles: string[] = usr.roles && usr.roles.length > 0 ? usr.roles : [usr.rol || 'Operador'];
+                        const userRoles: string[] = usr.roles && usr.roles.length > 0 ? usr.roles : [usr.rol || 'Operador'];
 
-                      return (
-                        <View
-                          key={usr.usuario_id}
-                          style={[
-                            styles.userRowCard,
-                            {
-                              backgroundColor: colors.bg.elevated,
-                              borderColor: colors.border.default,
-                            },
-                          ]}
-                        >
-                          {/* ── COLUMNA IZQUIERDA: INFORMACIÓN ── */}
-                          <View style={{ flex: 1, minWidth: 0 }}>
-                            {/* Fila 1 (Header): Nombre del operador + Badges (Autoridad / Admin + Suspendido) en la misma línea */}
-                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'nowrap', marginBottom: 8 }}>
-                              <Text
-                                style={[styles.userNameText, { color: colors.text.primary }]}
-                                numberOfLines={1}
-                              >
-                                {usr.nombre} {usr.apellido}
-                              </Text>
+                        return (
+                          <View
+                            key={usr.usuario_id}
+                            style={[
+                              styles.userRowCard,
+                              {
+                                backgroundColor: colors.bg.elevated,
+                                borderColor: colors.border.default,
+                              },
+                            ]}
+                          >
+                            {/* ── COLUMNA IZQUIERDA: INFORMACIÓN ── */}
+                            <View style={{ flex: 1, minWidth: 0 }}>
+                              {/* Fila 1 (Header): Nombre del operador + Badges (Autoridad / Admin + Suspendido) en la misma línea */}
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'nowrap', marginBottom: 8 }}>
+                                <Text
+                                  style={[styles.userNameText, { color: colors.text.primary }]}
+                                  numberOfLines={1}
+                                >
+                                  {usr.nombre} {usr.apellido}
+                                </Text>
 
-                              {userRoles.map((r: string) => {
-                                const isCivil = r === 'Víctima' || r === 'Civil';
-                                const roleLabel = isCivil ? 'Civil' : r;
-                                const isAdm = r === 'Administrador';
-                                const isAut = r === 'Autoridad';
-                                return (
-                                  <View
-                                    key={r}
-                                    style={[
-                                      styles.userRoleTag,
-                                      {
-                                        backgroundColor: isAdm ? '#3B1D4A' : isAut ? '#1E3A5F' : '#1E293B',
-                                        borderColor: isAdm ? '#A855F7' : isAut ? '#3B82F6' : '#64748B',
-                                        flexShrink: 0,
-                                      },
-                                    ]}
-                                  >
-                                    <Text
-                                      style={{
-                                        fontSize: 11,
-                                        fontWeight: '700',
-                                        color: isAdm ? '#E9D5FF' : isAut ? '#BFDBFE' : '#94A3B8',
-                                      }}
+                                {userRoles.map((r: string) => {
+                                  const isCivil = r === 'Víctima' || r === 'Civil';
+                                  const roleLabel = isCivil ? 'Civil' : r;
+                                  const isAdm = r === 'Administrador';
+                                  const isAut = r === 'Autoridad';
+                                  return (
+                                    <View
+                                      key={r}
+                                      style={[
+                                        styles.userRoleTag,
+                                        {
+                                          backgroundColor: isAdm ? '#3B1D4A' : isAut ? '#1E3A5F' : '#1E293B',
+                                          borderColor: isAdm ? '#A855F7' : isAut ? '#3B82F6' : '#64748B',
+                                          flexShrink: 0,
+                                        },
+                                      ]}
                                     >
-                                      {roleLabel}
+                                      <Text
+                                        style={{
+                                          fontSize: 11,
+                                          fontWeight: '700',
+                                          color: isAdm ? '#E9D5FF' : isAut ? '#BFDBFE' : '#94A3B8',
+                                        }}
+                                      >
+                                        {roleLabel}
+                                      </Text>
+                                    </View>
+                                  );
+                                })}
+
+                                {/* Insignia Limpia de Estado (Suspendido) */}
+                                <View
+                                  style={[
+                                    styles.userStatusTag,
+                                    {
+                                      backgroundColor: '#451A1A',
+                                      borderColor: '#EF4444',
+                                      flexShrink: 0,
+                                    },
+                                  ]}
+                                >
+                                  <Text
+                                    style={{
+                                      fontSize: 11,
+                                      fontWeight: '700',
+                                      color: '#FCA5A5',
+                                    }}
+                                  >
+                                    Suspendido
+                                  </Text>
+                                </View>
+                              </View>
+
+                              {/* Fila 2 (Datos personales): Grilla ordenada de chips */}
+                              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 8, alignItems: 'center' }}>
+                                <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
+                                  <CreditCard size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
+                                  <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                                    DNI: <Text style={{ color: colors.text.primary, fontWeight: '600' }}>{usr.dni || 'Sin DNI'}</Text>
+                                  </Text>
+                                </View>
+
+                                <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
+                                  <Mail size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
+                                  <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                                    {usr.email}
+                                  </Text>
+                                </View>
+
+                                {usr.telefono ? (
+                                  <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
+                                    <Phone size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
+                                    <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                                      {usr.telefono}
                                     </Text>
                                   </View>
-                                );
-                              })}
+                                ) : null}
 
-                              {/* Insignia Limpia de Estado (Suspendido) */}
-                              <View
+                                {usr.fecha_nacimiento ? (
+                                  <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
+                                    <Calendar size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
+                                    <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                                      Nac: {usr.fecha_nacimiento}
+                                    </Text>
+                                  </View>
+                                ) : null}
+
+                                {usr.genero && usr.genero !== 'No especificado' ? (
+                                  <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
+                                    <User size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
+                                    <Text style={{ fontSize: 11, color: colors.text.secondary }}>
+                                      {usr.genero}
+                                    </Text>
+                                  </View>
+                                ) : null}
+                              </View>
+
+                              {/* Fila 3 (Caja Institucional) */}
+                              {(usr.institucion || usr.dependencia || usr.cargo) ? (
+                                <View
+                                  style={[
+                                    styles.institutionalBoxClean,
+                                    {
+                                      backgroundColor: colors.bg.base,
+                                      borderColor: colors.border.default,
+                                    },
+                                  ]}
+                                >
+                                  <View style={[styles.institutionalIconContainer, { backgroundColor: isDark ? 'rgba(59, 130, 246, 0.15)' : '#EFF6FF' }]}>
+                                    <Building size={16} color="#3B82F6" />
+                                  </View>
+                                  <View style={{ flex: 1, minWidth: 0 }}>
+                                    <Text style={{ fontSize: 12, fontWeight: '700', color: colors.text.primary }} numberOfLines={1}>
+                                      {usr.institucion || 'Policía de la Provincia de Formosa'}
+                                      {usr.dependencia ? ` • ${usr.dependencia}` : ''}
+                                    </Text>
+                                    <Text style={{ fontSize: 11, color: colors.text.secondary, marginTop: 1 }} numberOfLines={1}>
+                                      {usr.cargo || 'Oficial'}
+                                      {usr.legajo ? ` (Legajo: ${usr.legajo})` : ''}
+                                      {usr.sede ? ` • Sede: ${usr.sede}` : ''}
+                                    </Text>
+                                  </View>
+                                </View>
+                              ) : null}
+                            </View>
+
+                            {/* ── COLUMNA DERECHA: ACCIONES COMPACTAS ── */}
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0, alignSelf: 'flex-start' }}>
+
+                              {/* Editar Operador Institucional */}
+                              <TouchableOpacity
                                 style={[
-                                  styles.userStatusTag,
+                                  styles.userActionBtnClean,
                                   {
-                                    backgroundColor: '#451A1A',
-                                    borderColor: '#EF4444',
-                                    flexShrink: 0,
+                                    backgroundColor: isDark ? '#1C2E3D' : '#EFF6FF',
+                                    borderColor: colors.semantic.info,
                                   },
                                 ]}
+                                onPress={() => handleAbrirEditarOperador(usr)}
+                                accessibilityLabel="Editar Operador Institucional"
                               >
+                                <Pencil size={13} color={colors.semantic.info} style={{ marginRight: 4 }} />
+                                <Text style={{ fontSize: 12, fontWeight: '600', color: colors.semantic.info }}>
+                                  Editar
+                                </Text>
+                              </TouchableOpacity>
+
+                              {/* Reactivar Operador */}
+                              <TouchableOpacity
+                                style={[
+                                  styles.userActionBtnClean,
+                                  {
+                                    backgroundColor: colors.semantic.infoBg,
+                                    borderColor: colors.semantic.info,
+                                  },
+                                ]}
+                                onPress={() => handleConfirmarReactivacion(usr)}
+                                accessibilityLabel="Reactivar Operador Institucional"
+                              >
+                                <UserCheck size={13} color={colors.semantic.info} style={{ marginRight: 4 }} />
                                 <Text
                                   style={{
-                                    fontSize: 11,
-                                    fontWeight: '700',
-                                    color: '#FCA5A5',
+                                    fontSize: 12,
+                                    fontWeight: '600',
+                                    color: colors.semantic.info,
                                   }}
                                 >
-                                  Suspendido
+                                  Reactivar
                                 </Text>
-                              </View>
+                              </TouchableOpacity>
                             </View>
-
-                            {/* Fila 2 (Datos personales): Grilla ordenada de chips */}
-                            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 8, alignItems: 'center' }}>
-                              <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
-                                <CreditCard size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
-                                <Text style={{ fontSize: 11, color: colors.text.secondary }}>
-                                  DNI: <Text style={{ color: colors.text.primary, fontWeight: '600' }}>{usr.dni || 'Sin DNI'}</Text>
-                                </Text>
-                              </View>
-
-                              <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
-                                <Mail size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
-                                <Text style={{ fontSize: 11, color: colors.text.secondary }}>
-                                  {usr.email}
-                                </Text>
-                              </View>
-
-                              {usr.telefono ? (
-                                <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
-                                  <Phone size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
-                                  <Text style={{ fontSize: 11, color: colors.text.secondary }}>
-                                    {usr.telefono}
-                                  </Text>
-                                </View>
-                              ) : null}
-
-                              {usr.fecha_nacimiento ? (
-                                <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
-                                  <Calendar size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
-                                  <Text style={{ fontSize: 11, color: colors.text.secondary }}>
-                                    Nac: {usr.fecha_nacimiento}
-                                  </Text>
-                                </View>
-                              ) : null}
-
-                              {usr.genero && usr.genero !== 'No especificado' ? (
-                                <View style={[styles.personalDataChip, { backgroundColor: colors.bg.base, borderColor: colors.border.default }]}>
-                                  <User size={12} color={colors.semantic.info} style={{ marginRight: 5 }} />
-                                  <Text style={{ fontSize: 11, color: colors.text.secondary }}>
-                                    {usr.genero}
-                                  </Text>
-                                </View>
-                              ) : null}
-                            </View>
-
-                            {/* Fila 3 (Caja Institucional) */}
-                            {(usr.institucion || usr.dependencia || usr.cargo) ? (
-                              <View
-                                style={[
-                                  styles.institutionalBoxClean,
-                                  {
-                                    backgroundColor: colors.bg.base,
-                                    borderColor: colors.border.default,
-                                  },
-                                ]}
-                              >
-                                <View style={[styles.institutionalIconContainer, { backgroundColor: isDark ? 'rgba(59, 130, 246, 0.15)' : '#EFF6FF' }]}>
-                                  <Building size={16} color="#3B82F6" />
-                                </View>
-                                <View style={{ flex: 1, minWidth: 0 }}>
-                                  <Text style={{ fontSize: 12, fontWeight: '700', color: colors.text.primary }} numberOfLines={1}>
-                                    {usr.institucion || 'Policía de la Provincia de Formosa'}
-                                    {usr.dependencia ? ` • ${usr.dependencia}` : ''}
-                                  </Text>
-                                  <Text style={{ fontSize: 11, color: colors.text.secondary, marginTop: 1 }} numberOfLines={1}>
-                                    {usr.cargo || 'Oficial'}
-                                    {usr.legajo ? ` (Legajo: ${usr.legajo})` : ''}
-                                    {usr.sede ? ` • Sede: ${usr.sede}` : ''}
-                                  </Text>
-                                </View>
-                              </View>
-                            ) : null}
                           </View>
-
-                          {/* ── COLUMNA DERECHA: ACCIONES COMPACTAS ── */}
-                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0, alignSelf: 'flex-start' }}>
-
-                            {/* Editar Operador Institucional */}
-                            <TouchableOpacity
-                              style={[
-                                styles.userActionBtnClean,
-                                {
-                                  backgroundColor: isDark ? '#1C2E3D' : '#EFF6FF',
-                                  borderColor: colors.semantic.info,
-                                },
-                              ]}
-                              onPress={() => handleAbrirEditarOperador(usr)}
-                              accessibilityLabel="Editar Operador Institucional"
-                            >
-                              <Pencil size={13} color={colors.semantic.info} style={{ marginRight: 4 }} />
-                              <Text style={{ fontSize: 12, fontWeight: '600', color: colors.semantic.info }}>
-                                Editar
-                              </Text>
-                            </TouchableOpacity>
-
-                            {/* Reactivar Operador */}
-                            <TouchableOpacity
-                              style={[
-                                styles.userActionBtnClean,
-                                {
-                                  backgroundColor: colors.semantic.infoBg,
-                                  borderColor: colors.semantic.info,
-                                },
-                              ]}
-                              onPress={() => handleConfirmarReactivacion(usr)}
-                              accessibilityLabel="Reactivar Operador Institucional"
-                            >
-                              <UserCheck size={13} color={colors.semantic.info} style={{ marginRight: 4 }} />
-                              <Text
-                                style={{
-                                  fontSize: 12,
-                                  fontWeight: '600',
-                                  color: colors.semantic.info,
-                                }}
-                              >
-                                Reactivar
-                              </Text>
-                            </TouchableOpacity>
-                          </View>
-                        </View>
-                      );
-                    })}
+                        );
+                      })}
 
                     {/* Barra de Paginación Inactivos */}
                     <View style={styles.paginationBar}>
@@ -5217,7 +6451,7 @@ export default function App() {
                   <Text style={[styles.inputLabel, { color: colors.text.primary, fontWeight: '700', marginBottom: 6 }]}>
                     Camino 1: Vincular Usuario Civil Existente (Recomendado si ya está registrado en App ApoyAR)
                   </Text>
-                  
+
                   {selectedCivilUser ? (
                     <View style={[styles.linkedCivilBanner, { backgroundColor: '#143823', borderColor: '#22C55E' }]}>
                       <View style={{ flex: 1 }}>
@@ -5340,7 +6574,7 @@ export default function App() {
                         Autoridad
                       </Text>
                       <Text style={[styles.roleSelectDesc, { color: colors.text.disabled }]}>
-                        Personal policial / judicial. Monitoreo cartográfico en vivo y peritaje de evidencias.
+                        {perfilesCatalogo.find((p) => p.nombre === 'Autoridad')?.descripcion || 'Personal operativo autorizado para respuesta, visualización de alertas y custodia de evidencias.'}
                       </Text>
                     </TouchableOpacity>
 
@@ -5382,30 +6616,108 @@ export default function App() {
                         Administrador
                       </Text>
                       <Text style={[styles.roleSelectDesc, { color: colors.text.disabled }]}>
-                        Gestión técnica global, administración de operadores y auditoría institucional.
+                        {perfilesCatalogo.find((p) => p.nombre === 'Administrador')?.descripcion || 'Gestión técnica global, administración de operadores y auditoría institucional.'}
                       </Text>
                     </TouchableOpacity>
                   </View>
-                  <View style={{ marginTop: spacing.sm }}>
-                      <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Otros perfiles (personalizados)</Text>
-                      {perfilesAsignables.length === 0 && (
-                        <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-                          <Text style={{ fontSize: 12, color: colors.text.disabled }}>
-                            Todavía no hay perfiles personalizados.
+                  <View style={{ marginTop: spacing.md }}>
+                    <TouchableOpacity
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        paddingVertical: 10,
+                        paddingHorizontal: 12,
+                        backgroundColor: colors.bg.elevated,
+                        borderRadius: radii.sm,
+                        borderWidth: 1,
+                        borderColor: colors.border.default,
+                      }}
+                      onPress={() => setDesplegarPerfilesPersonalizados((prev) => !prev)}
+                      accessibilityLabel="Desplegar u ocultar perfiles personalizados"
+                    >
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                        <Sliders size={16} color={colors.semantic.info} />
+                        <Text style={[styles.inputLabel, { color: colors.text.primary, marginBottom: 0, fontSize: 13 }]}>
+                          Otros perfiles (personalizados)
+                        </Text>
+                        <View
+                          style={{
+                            backgroundColor: colors.bg.surface,
+                            paddingHorizontal: 8,
+                            paddingVertical: 2,
+                            borderRadius: radii.full,
+                            borderWidth: 1,
+                            borderColor: colors.border.default,
+                          }}
+                        >
+                          <Text style={{ fontSize: 11, color: colors.text.secondary, fontWeight: '700' }}>
+                            {perfilesAsignables.length}
                           </Text>
-                          {puede('perfil.gestionar') && (
-                            <TouchableOpacity onPress={() => setAdminTab('perfiles')}>
-                              <Text style={{ fontSize: 12, fontWeight: '700', color: colors.semantic.info }}>Crear uno en «Perfiles y permisos»</Text>
-                            </TouchableOpacity>
-                          )}
                         </View>
-                      )}
-                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                        {selectedRolesAlta.some((r) => perfilesAsignables.includes(r)) && (
+                          <View
+                            style={{
+                              backgroundColor: colors.semantic.infoBg,
+                              paddingHorizontal: 8,
+                              paddingVertical: 2,
+                              borderRadius: radii.full,
+                              borderWidth: 1,
+                              borderColor: colors.semantic.info,
+                            }}
+                          >
+                            <Text style={{ fontSize: 11, color: colors.semantic.info, fontWeight: '700' }}>
+                              {selectedRolesAlta.filter((r) => perfilesAsignables.includes(r)).length} seleccionado(s)
+                            </Text>
+                          </View>
+                        )}
+                      </View>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <Text style={{ fontSize: 12, color: colors.text.secondary }}>
+                          {desplegarPerfilesPersonalizados ? 'Ocultar' : 'Ver perfiles'}
+                        </Text>
+                        {desplegarPerfilesPersonalizados ? (
+                          <ChevronUp size={16} color={colors.text.secondary} />
+                        ) : (
+                          <ChevronDown size={16} color={colors.text.secondary} />
+                        )}
+                      </View>
+                    </TouchableOpacity>
+
+                    {perfilesAsignables.length === 0 && desplegarPerfilesPersonalizados && (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginTop: 8, paddingHorizontal: 4 }}>
+                        <Text style={{ fontSize: 12, color: colors.text.disabled }}>
+                          Todavía no hay perfiles personalizados.
+                        </Text>
+                        {puede('perfil.gestionar') && (
+                          <TouchableOpacity onPress={() => setAdminTab('perfiles')}>
+                            <Text style={{ fontSize: 12, fontWeight: '700', color: colors.semantic.info }}>
+                              Crear uno en «Perfiles y permisos»
+                            </Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    )}
+
+                    {desplegarPerfilesPersonalizados && perfilesAsignables.length > 0 && (
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginTop: 10 }}>
                         {perfilesAsignables.map((nombrePerfil) => {
                           const marcado = selectedRolesAlta.includes(nombrePerfil);
+                          const perfilObj = perfilesCatalogo.find((p) => p.nombre === nombrePerfil);
+                          const desc = perfilObj?.descripcion || 'Perfil personalizado institucional.';
                           return (
                             <TouchableOpacity
                               key={nombrePerfil}
+                              style={[
+                                styles.roleSelectCard,
+                                {
+                                  flexBasis: '48%',
+                                  flexGrow: 1,
+                                  minWidth: 220,
+                                  backgroundColor: marcado ? colors.semantic.infoBg : colors.bg.elevated,
+                                  borderColor: marcado ? colors.semantic.info : colors.border.default,
+                                },
+                              ]}
                               onPress={() =>
                                 setSelectedRolesAlta((prev) =>
                                   prev.includes(nombrePerfil)
@@ -5413,29 +6725,41 @@ export default function App() {
                                     : [...prev, nombrePerfil]
                                 )
                               }
-                              style={[
-                                styles.userRoleTag,
-                                {
-                                  backgroundColor: marcado ? colors.semantic.infoBg : colors.bg.elevated,
-                                  borderColor: marcado ? colors.semantic.info : colors.border.default,
-                                  flexDirection: 'row',
-                                  alignItems: 'center',
-                                },
-                              ]}
                             >
-                              {marcado && <Check size={12} color={colors.semantic.info} style={{ marginRight: 4 }} />}
-                              <Text style={{ fontSize: 12, fontWeight: '700', color: marcado ? colors.semantic.info : colors.text.primary }}>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                                <Sliders size={20} color={marcado ? colors.semantic.info : colors.text.secondary} />
+                                <View
+                                  style={{
+                                    width: 18,
+                                    height: 18,
+                                    borderRadius: 4,
+                                    borderWidth: 1.5,
+                                    borderColor: marcado ? colors.semantic.info : colors.text.disabled,
+                                    backgroundColor: marcado ? colors.semantic.info : 'transparent',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                  }}
+                                >
+                                  {marcado && <Check size={12} color="#FFFFFF" />}
+                                </View>
+                              </View>
+                              <Text style={[styles.roleSelectTitle, { color: marcado ? colors.semantic.info : colors.text.primary }]}>
                                 {nombrePerfil}
+                              </Text>
+                              <Text style={[styles.roleSelectDesc, { color: colors.text.disabled }]}>
+                                {desc}
                               </Text>
                             </TouchableOpacity>
                           );
                         })}
                       </View>
-                      {selectedRolesAlta.length === 0 && (
-                        <Text style={{ fontSize: 12, color: colors.semantic.warning, marginTop: 6 }}>
-                          Elegí al menos un perfil para el operador.
-                        </Text>
-                      )}
+                    )}
+
+                    {selectedRolesAlta.length === 0 && (
+                      <Text style={{ fontSize: 12, color: colors.semantic.warning, marginTop: 6 }}>
+                        Elegí al menos un perfil para el operador.
+                      </Text>
+                    )}
                   </View>
                 </View>
 
@@ -5599,12 +6923,24 @@ export default function App() {
                       <View style={[styles.formRow, { flex: 1 }]}>
                         <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Legajo / Matrícula Personal * (Único)</Text>
                         <TextInput
-                          style={[styles.modalInput, { backgroundColor: colors.bg.elevated, borderColor: colors.border.default, color: colors.text.primary }]}
+                          style={[
+                            styles.modalInput,
+                            {
+                              backgroundColor: colors.bg.elevated,
+                              borderColor: operatorTouched.legajo && operatorErrors.legajo ? colors.semantic.danger : colors.border.default,
+                              color: colors.text.primary,
+                            },
+                          ]}
                           placeholder="ej: LP-POL-10823 (obligatorio)"
                           placeholderTextColor={colors.text.disabled}
                           value={nuevoLegajo}
-                          onChangeText={setNuevoLegajo}
+                          onChangeText={(text) => handleOperatorChangeText('legajo', text)}
+                          onBlur={() => handleOperatorBlur('legajo', nuevoLegajo)}
+                          autoCapitalize="characters"
                         />
+                        {operatorTouched.legajo && operatorErrors.legajo && (
+                          <Text style={[styles.fieldErrorText, { color: colors.semantic.danger }]}>{operatorErrors.legajo}</Text>
+                        )}
                       </View>
                     </View>
                   </View>
@@ -6548,36 +7884,122 @@ export default function App() {
 
               {perfilesAsignables.length > 0 && (
                 <View style={styles.formRow}>
-                  <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Perfiles personalizados</Text>
-                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                    {perfilesAsignables.map((nombrePerfil) => {
-                      const marcado = editPerfilesPersonalizados.includes(nombrePerfil);
-                      return (
-                        <TouchableOpacity
-                          key={nombrePerfil}
-                          onPress={() =>
-                            setEditPerfilesPersonalizados((prev) =>
-                              prev.includes(nombrePerfil) ? prev.filter((r) => r !== nombrePerfil) : [...prev, nombrePerfil]
-                            )
-                          }
-                          style={[
-                            styles.userRoleTag,
-                            {
-                              backgroundColor: marcado ? colors.semantic.infoBg : colors.bg.elevated,
-                              borderColor: marcado ? colors.semantic.info : colors.border.default,
-                              flexDirection: 'row',
-                              alignItems: 'center',
-                            },
-                          ]}
+                  <TouchableOpacity
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      paddingVertical: 10,
+                      paddingHorizontal: 12,
+                      backgroundColor: colors.bg.elevated,
+                      borderRadius: radii.sm,
+                      borderWidth: 1,
+                      borderColor: colors.border.default,
+                    }}
+                    onPress={() => setDesplegarEditPerfilesPersonalizados((prev) => !prev)}
+                    accessibilityLabel="Desplegar u ocultar perfiles personalizados"
+                  >
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <Sliders size={16} color={colors.semantic.info} />
+                      <Text style={[styles.inputLabel, { color: colors.text.primary, marginBottom: 0, fontSize: 13 }]}>
+                        Perfiles personalizados
+                      </Text>
+                      <View
+                        style={{
+                          backgroundColor: colors.bg.surface,
+                          paddingHorizontal: 8,
+                          paddingVertical: 2,
+                          borderRadius: radii.full,
+                          borderWidth: 1,
+                          borderColor: colors.border.default,
+                        }}
+                      >
+                        <Text style={{ fontSize: 11, color: colors.text.secondary, fontWeight: '700' }}>
+                          {perfilesAsignables.length}
+                        </Text>
+                      </View>
+                      {editPerfilesPersonalizados.length > 0 && (
+                        <View
+                          style={{
+                            backgroundColor: colors.semantic.infoBg,
+                            paddingHorizontal: 8,
+                            paddingVertical: 2,
+                            borderRadius: radii.full,
+                            borderWidth: 1,
+                            borderColor: colors.semantic.info,
+                          }}
                         >
-                          {marcado && <Check size={12} color={colors.semantic.info} style={{ marginRight: 4 }} />}
-                          <Text style={{ fontSize: 12, fontWeight: '700', color: marcado ? colors.semantic.info : colors.text.primary }}>
-                            {nombrePerfil}
+                          <Text style={{ fontSize: 11, color: colors.semantic.info, fontWeight: '700' }}>
+                            {editPerfilesPersonalizados.length} asignado(s)
                           </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
+                        </View>
+                      )}
+                    </View>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <Text style={{ fontSize: 12, color: colors.text.secondary }}>
+                        {desplegarEditPerfilesPersonalizados ? 'Ocultar' : 'Ver perfiles'}
+                      </Text>
+                      {desplegarEditPerfilesPersonalizados ? (
+                        <ChevronUp size={16} color={colors.text.secondary} />
+                      ) : (
+                        <ChevronDown size={16} color={colors.text.secondary} />
+                      )}
+                    </View>
+                  </TouchableOpacity>
+
+                  {desplegarEditPerfilesPersonalizados && (
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginTop: 10 }}>
+                      {perfilesAsignables.map((nombrePerfil) => {
+                        const marcado = editPerfilesPersonalizados.includes(nombrePerfil);
+                        const perfilObj = perfilesCatalogo.find((p) => p.nombre === nombrePerfil);
+                        const desc = perfilObj?.descripcion || 'Perfil personalizado institucional.';
+                        return (
+                          <TouchableOpacity
+                            key={nombrePerfil}
+                            style={[
+                              styles.roleSelectCard,
+                              {
+                                flexBasis: '48%',
+                                flexGrow: 1,
+                                minWidth: 220,
+                                backgroundColor: marcado ? colors.semantic.infoBg : colors.bg.elevated,
+                                borderColor: marcado ? colors.semantic.info : colors.border.default,
+                              },
+                            ]}
+                            onPress={() =>
+                              setEditPerfilesPersonalizados((prev) =>
+                                prev.includes(nombrePerfil) ? prev.filter((r) => r !== nombrePerfil) : [...prev, nombrePerfil]
+                              )
+                            }
+                          >
+                            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                              <Sliders size={20} color={marcado ? colors.semantic.info : colors.text.secondary} />
+                              <View
+                                style={{
+                                  width: 18,
+                                  height: 18,
+                                  borderRadius: 4,
+                                  borderWidth: 1.5,
+                                  borderColor: marcado ? colors.semantic.info : colors.text.disabled,
+                                  backgroundColor: marcado ? colors.semantic.info : 'transparent',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                }}
+                              >
+                                {marcado && <Check size={12} color="#FFFFFF" />}
+                              </View>
+                            </View>
+                            <Text style={[styles.roleSelectTitle, { color: marcado ? colors.semantic.info : colors.text.primary }]}>
+                              {nombrePerfil}
+                            </Text>
+                            <Text style={[styles.roleSelectDesc, { color: colors.text.disabled }]}>
+                              {desc}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  )}
                   <Text style={{ fontSize: 11, color: colors.text.disabled, marginTop: 4 }}>
                     Autoridad y Administrador no se quitan desde acá (quedan registrados por auditoría).
                   </Text>
@@ -6673,18 +8095,18 @@ export default function App() {
               <View style={{ backgroundColor: colors.bg.base, padding: spacing.sm, borderRadius: radii.md, borderWidth: 1, borderColor: colors.border.default, gap: 8 }}>
                 {haversineTestigoRef
                   ? renderEvidenciaDeCorrelacion({
-                      id: haversineTestigoRef.id,
-                      tipo_archivo: haversineTestigoRef.tipo_archivo,
-                      fecha_captura: haversineTestigoRef.fecha_captura,
-                      origen_captura: 'testigo',
-                      bloqueado_sin_consentimiento: !haversineTestigoRef.consentimiento_exportacion,
-                    })
+                    id: haversineTestigoRef.id,
+                    tipo_archivo: haversineTestigoRef.tipo_archivo,
+                    fecha_captura: haversineTestigoRef.fecha_captura,
+                    origen_captura: 'testigo',
+                    bloqueado_sin_consentimiento: !haversineTestigoRef.consentimiento_exportacion,
+                  })
                   : haversineIncidenteRef && (
-                      <>
-                        {renderAlternarEvidencias(haversineIncidenteRef.id, 'Evidencias de este incidente')}
-                        {renderEvidenciasDeIncidente(haversineIncidenteRef.id)}
-                      </>
-                    )}
+                    <>
+                      {renderAlternarEvidencias(haversineIncidenteRef.id, 'Evidencias de este incidente')}
+                      {renderEvidenciasDeIncidente(haversineIncidenteRef.id)}
+                    </>
+                  )}
               </View>
 
               {/* Controles de Configuración de Umbral */}
@@ -6914,6 +8336,195 @@ export default function App() {
                 </View>
               )}
             </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── MODAL: REVISIÓN DE UN CASO CERRADO ── */}
+      <Modal visible={Boolean(accionRevision)} transparent animationType="fade" onRequestClose={() => setAccionRevision(null)}>
+        <View style={styles.passwordModalOverlay}>
+          <View style={[styles.passwordModalBox, { backgroundColor: colors.bg.surface, borderColor: colors.border.default, maxWidth: 540 }]}>
+            <View style={[styles.adminModalHeader, { borderBottomColor: colors.border.default }]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <View style={{ width: 36, height: 36, borderRadius: radii.full, backgroundColor: colors.semantic.warningBg, alignItems: 'center', justifyContent: 'center' }}>
+                  {accionRevision === 'reabrir' ? <RefreshCw size={20} color={colors.semantic.warning} /> : accionRevision === 'seguimiento' ? <Pencil size={20} color={colors.semantic.warning} /> : <CheckCircle2 size={20} color={colors.semantic.warning} />}
+                </View>
+                <View>
+                  <Text style={[styles.auditTitle, { color: colors.text.primary }]}>
+                    {accionRevision === 'reabrir' ? 'Reabrir Caso' : accionRevision === 'seguimiento' ? 'Nota de Seguimiento' : 'Cerrar Revisión'}
+                  </Text>
+                  <Text style={[styles.auditSubtitle, { color: colors.text.secondary }]}>
+                    {selectedIncidente?.victima_nombre || 'Persona protegida'} • Inicio: {selectedIncidente ? new Date(selectedIncidente.fecha_hora).toLocaleString('es-AR') : ''}
+                  </Text>
+                </View>
+              </View>
+              <TouchableOpacity onPress={() => setAccionRevision(null)} style={styles.closeBtn}>
+                <X size={20} color={colors.text.secondary} />
+              </TouchableOpacity>
+            </View>
+
+            <View style={{ padding: spacing.lg, gap: spacing.md }}>
+              <View style={styles.formRow}>
+                <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>
+                  {accionRevision === 'seguimiento' ? 'Nota *' : 'Motivo *'}
+                </Text>
+                <TextInput
+                  style={[
+                    styles.modalInput,
+                    { backgroundColor: colors.bg.elevated, borderColor: colors.border.default, color: colors.text.primary, height: 90, textAlignVertical: 'top' as any, paddingTop: 8 },
+                  ]}
+                  value={revisionTexto}
+                  onChangeText={setRevisionTexto}
+                  placeholder={
+                    accionRevision === 'reabrir'
+                      ? 'Por qué se retoma el caso: nueva declaración, nueva evidencia, pedido judicial...'
+                      : accionRevision === 'seguimiento'
+                      ? 'Qué se hizo: declaración tomada, pedido enviado, contacto con la víctima...'
+                      : 'Con qué resultado termina la revisión...'
+                  }
+                  placeholderTextColor={colors.text.disabled}
+                  multiline
+                />
+                <Text style={{ fontSize: 11, color: colors.text.secondary, marginTop: 4 }}>
+                  Mínimo 10 caracteres requeridos. Ingresados: {revisionTexto.trim().length}
+                </Text>
+              </View>
+
+              {accionRevision === 'reabrir' && (
+                <View style={[styles.alertSuccessBox, { backgroundColor: isDark ? '#0C1E33' : '#EFF6FF', borderColor: '#3B82F6' }]}>
+                  <Info size={16} color="#3B82F6" style={{ marginRight: 8, flexShrink: 0 }} />
+                  <Text style={{ color: isDark ? '#BFDBFE' : '#1E40AF', fontSize: 11, lineHeight: 16 }}>
+                    El caso queda en revisión para seguir investigándolo.
+                  </Text>
+                </View>
+              )}
+
+              <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 12, marginTop: 4 }}>
+                <TouchableOpacity style={[styles.secondaryModalBtn, { borderColor: colors.border.default }]} onPress={() => setAccionRevision(null)}>
+                  <Text style={{ color: colors.text.primary, fontWeight: '600', fontSize: 13 }}>Cancelar</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.primaryModalBtn,
+                    {
+                      backgroundColor: colors.semantic.info,
+                      opacity: guardandoRevision || revisionTexto.trim().length < 10 ? 0.45 : 1,
+                      cursor: guardandoRevision || revisionTexto.trim().length < 10 ? 'not-allowed' : 'pointer',
+                    } as any,
+                  ]}
+                  onPress={handleConfirmarRevision}
+                  disabled={guardandoRevision || revisionTexto.trim().length < 10}
+                >
+                  {guardandoRevision ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <Text style={{ color: '#FFFFFF', fontWeight: '700', fontSize: 13 }}>Confirmar</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── MODAL: CIERRE DE UNA EMERGENCIA POR UN OPERADOR ── */}
+      <Modal visible={Boolean(cierreIncidente)} transparent animationType="fade" onRequestClose={() => setCierreIncidente(null)}>
+        <View style={styles.passwordModalOverlay}>
+          <View style={[styles.passwordModalBox, { backgroundColor: colors.bg.surface, borderColor: colors.border.default, maxWidth: 540 }]}>
+            <View style={[styles.adminModalHeader, { borderBottomColor: colors.border.default }]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <View style={{ width: 36, height: 36, borderRadius: radii.full, backgroundColor: 'rgba(16, 185, 129, 0.15)', alignItems: 'center', justifyContent: 'center' }}>
+                  <CheckCircle2 size={20} color="#10B981" />
+                </View>
+                <View>
+                  <Text style={[styles.auditTitle, { color: colors.text.primary }]}>Finalizar Emergencia</Text>
+                  <Text style={[styles.auditSubtitle, { color: colors.text.secondary }]}>
+                    {cierreIncidente?.victima_nombre || 'Persona protegida'} • Inicio: {cierreIncidente ? new Date(cierreIncidente.fecha_hora).toLocaleString('es-AR') : ''}
+                  </Text>
+                </View>
+              </View>
+              <TouchableOpacity onPress={() => setCierreIncidente(null)} style={styles.closeBtn}>
+                <X size={20} color={colors.text.secondary} />
+              </TouchableOpacity>
+            </View>
+
+            <View style={{ padding: spacing.lg, gap: spacing.md }}>
+              <View style={styles.formRow}>
+                <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Motivo del cierre *</Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4 }}>
+                  {MOTIVOS_CIERRE.map((motivo) => {
+                    const elegido = cierreMotivo === motivo.valor;
+                    return (
+                      <TouchableOpacity
+                        key={motivo.valor}
+                        onPress={() => setCierreMotivo(motivo.valor)}
+                        style={{
+                          paddingHorizontal: 12,
+                          paddingVertical: 6,
+                          borderRadius: radii.full,
+                          borderWidth: 1,
+                          backgroundColor: elegido ? colors.semantic.infoBg : colors.bg.elevated,
+                          borderColor: elegido ? colors.semantic.info : colors.border.default,
+                        }}
+                      >
+                        <Text style={{ fontSize: 12, fontWeight: elegido ? '700' : '500', color: elegido ? colors.semantic.info : colors.text.secondary }}>
+                          {motivo.etiqueta}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+
+              <View style={styles.formRow}>
+                <Text style={[styles.inputLabel, { color: colors.text.secondary }]}>Detalle *</Text>
+                <TextInput
+                  style={[
+                    styles.modalInput,
+                    { backgroundColor: colors.bg.elevated, borderColor: colors.border.default, color: colors.text.primary, height: 90, textAlignVertical: 'top' as any, paddingTop: 8 },
+                  ]}
+                  value={cierreDetalle}
+                  onChangeText={setCierreDetalle}
+                  placeholder="Describa qué se hizo o por qué se cierra: intervención en el lugar, contacto con la víctima, ruido confundido con agresión..."
+                  placeholderTextColor={colors.text.disabled}
+                  multiline
+                />
+                <Text style={{ fontSize: 11, color: colors.text.secondary, marginTop: 4 }}>
+                  Mínimo 10 caracteres requeridos. Ingresados: {cierreDetalle.trim().length}
+                </Text>
+              </View>
+
+              <View style={[styles.alertSuccessBox, { backgroundColor: isDark ? '#0C1E33' : '#EFF6FF', borderColor: '#3B82F6' }]}>
+                <Info size={16} color="#3B82F6" style={{ marginRight: 8, flexShrink: 0 }} />
+                <Text style={{ color: isDark ? '#BFDBFE' : '#1E40AF', fontSize: 11, lineHeight: 16 }}>
+                  El cierre queda registrado en el caso con su identidad, el motivo y el detalle. Una emergencia cerrada no se puede reabrir desde el panel: solo la víctima inicia una nueva desde la aplicación.
+                </Text>
+              </View>
+
+              <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 12, marginTop: 4 }}>
+                <TouchableOpacity style={[styles.secondaryModalBtn, { borderColor: colors.border.default }]} onPress={() => setCierreIncidente(null)}>
+                  <Text style={{ color: colors.text.primary, fontWeight: '600', fontSize: 13 }}>Cancelar</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.primaryModalBtn,
+                    {
+                      backgroundColor: '#10B981',
+                      opacity: cerrandoIncidente || cierreDetalle.trim().length < 10 ? 0.45 : 1,
+                      cursor: cerrandoIncidente || cierreDetalle.trim().length < 10 ? 'not-allowed' : 'pointer',
+                    } as any,
+                  ]}
+                  onPress={handleConfirmarCierre}
+                  disabled={cerrandoIncidente || cierreDetalle.trim().length < 10}
+                >
+                  {cerrandoIncidente ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <Text style={{ color: '#FFFFFF', fontWeight: '700', fontSize: 13 }}>Finalizar Emergencia</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
           </View>
         </View>
       </Modal>

@@ -48,6 +48,30 @@ class UsuarioRepository(SupabaseRepository):
 
     # ── persona ──────────────────────────────────────────────────────────────
 
+    def buscar_usuario_por_email(self, email: str) -> Optional[Dict[str, Any]]:
+        """Busca un usuario por su correo electrónico institucional o registrado."""
+        if not email:
+            return None
+        res = (
+            self._query("usuario")
+            .select("usu_id_usuario, usu_email, per_id_persona")
+            .eq("usu_email", email.strip().lower())
+            .execute()
+        )
+        return self._primera_fila(res)
+
+    def buscar_usuario_por_persona_id(self, persona_id: Any) -> Optional[Dict[str, Any]]:
+        """Busca el usuario vinculado a una entidad persona dada."""
+        if not persona_id:
+            return None
+        res = (
+            self._query("usuario")
+            .select("usu_id_usuario, usu_email, per_id_persona")
+            .eq("per_id_persona", persona_id)
+            .execute()
+        )
+        return self._primera_fila(res)
+
     def insertar_persona(self, datos: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         res = self._query("persona").insert(datos).execute()
         return self._primera_fila(res)
@@ -61,6 +85,18 @@ class UsuarioRepository(SupabaseRepository):
             self._query("persona")
             .select("per_id_persona, usuario:usuario(usu_id_usuario)")
             .eq("per_dni", dni)
+            .execute()
+        )
+        return self._filas(res)
+
+    def buscar_personas_por_telefono(self, telefono: str) -> List[Dict[str, Any]]:
+        """Busca personas registradas con un número de teléfono específico."""
+        if not telefono:
+            return []
+        res = (
+            self._query("persona")
+            .select("per_id_persona, per_telefono, usuario:usuario(usu_id_usuario)")
+            .eq("per_telefono", telefono.strip())
             .execute()
         )
         return self._filas(res)

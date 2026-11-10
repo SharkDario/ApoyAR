@@ -23,7 +23,10 @@ from app.repositories.auth_gateway import SupabaseAuthGateway
 from app.repositories.perfil_repository import PerfilRepository
 from app.repositories.usuario_repository import UsuarioRepository
 from app.services.password_policy import hash_institutional_password, validar_complejidad_password
-from app.services.roles import ROL_AUTORIDAD, leer_perfil_asignado
+from app.services.roles import ROL_AUTORIDAD, ROL_CIVIL, leer_perfil_asignado
+
+# Id fijo del perfil Civil (migración 021), por si la búsqueda por nombre no devuelve nada
+PERFIL_CIVIL_ID = "41909988-8cb7-44db-81c6-4699c2401d40"
 from app.services.seguridad_login_service import SeguridadLoginService
 
 logger = logging.getLogger("apoyar.admin_autoridad")
@@ -152,6 +155,8 @@ class AutenticacionInstitucionalService:
         if self._seguridad:
             self._seguridad.registrar_exito(email_clean)
 
+        self._asegurar_perfil_civil(str(res.user.id))
+
         return {
             "status": "ok",
             "session": {
@@ -166,6 +171,26 @@ class AutenticacionInstitucionalService:
                 "email": res.user.email,
             },
         }
+
+    def _asegurar_perfil_civil(self, user_id: str) -> None:
+        """
+        Un operador del panel no recibe el perfil Civil al darse de alta (migración 016).
+        Si entra a la app móvil con su misma cuenta, se le asigna en ese momento para
+        que pueda activar el Modo Resguardo y recibir alertas. Un error acá no impide el ingreso.
+        """
+        try:
+            ids_civil = self._perfiles.buscar_ids_perfil(ROL_CIVIL) or [PERFIL_CIVIL_ID]
+            if any(self._perfiles.existe_asignacion(user_id, pid) for pid in ids_civil):
+                return
+            self._perfiles.insertar_asignacion({
+                "usu_id_usuario": user_id,
+                "prf_id_perfil": ids_civil[0],
+                "usuprf_estado_aprobacion": "activo",
+                "usuprf_notas": "Perfil civil asignado al iniciar sesión en la app móvil",
+            })
+            logger.info("Perfil Civil asignado a %s al ingresar a la app móvil", user_id)
+        except Exception as exc:
+            logger.warning("No se pudo asignar el perfil Civil a %s: %s", user_id, exc)
 
     def _roles_institucionales(self, user_id: str) -> List[str]:
         roles: List[str] = []

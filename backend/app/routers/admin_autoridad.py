@@ -7,21 +7,28 @@
 #   - usuario.gestionar / perfil.gestionar: usuarios del panel y perfiles.
 #   - incidente.monitorear: listado y mapa de incidentes.
 #   - incidente.correlacionar: sugerencias Haversine y vinculaciones.
+#   - incidente.estadisticas: totales anónimos y su descarga en Excel, PDF o CSV.
 #
 # Capa de presentación: valida la entrada, aplica RBAC y delega en los servicios.
 # ─────────────────────────────────────────────────────────────────────────────
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
+import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from app.dependencies import (
     get_autenticacion_institucional_service,
     get_catalogo_service,
+    get_estadistica_service,
     get_operador_service,
     get_perfil_service,
     get_supervision_service,
+    get_usuario_repository,
 )
+from app.repositories.usuario_repository import UsuarioRepository
+
+logger = logging.getLogger(__name__)
 from app.schemas.admin import (
     ActualizarOperadorRequest,
     ActualizarPerfilRequest,
@@ -33,13 +40,16 @@ from app.schemas.admin import (
     ConfirmarRecuperacionRequest,
     CorrelacionarIncidentesRequest,
     CrearOperadorRequest,
+    FiltroEstadisticasQuery,
     LoginInstitucionalRequest,
     LoginMovilRequest,
     PerfilRequest,
     RecuperarPasswordRequest,
+    ResumenEstadisticasResponse,
     SugerenciasQuery,
     SuspenderOperadorRequest,
 )
+from app.services.estadistica_service import EstadisticaService
 from app.services.auth_dependencies import get_current_active_user, require_permiso
 from app.services.autenticacion_institucional_service import AutenticacionInstitucionalService
 from app.services.catalogo_service import CatalogoInstitucionalService
@@ -47,6 +57,7 @@ from app.services.operador_service import OperadorService
 from app.services.perfil_service import PerfilService
 from app.services.roles import (
     P_INCIDENTE_CORRELACIONAR,
+    P_INCIDENTE_ESTADISTICAS,
     P_INCIDENTE_MONITOREAR,
     P_PERFIL_GESTIONAR,
     P_USUARIO_GESTIONAR,
@@ -60,6 +71,12 @@ solo_administrador = require_permiso(P_USUARIO_GESTIONAR)
 puede_monitorear = require_permiso(P_INCIDENTE_MONITOREAR)
 puede_correlacionar = require_permiso(P_INCIDENTE_CORRELACIONAR)
 puede_gestionar_perfiles = require_permiso(P_PERFIL_GESTIONAR)
+puede_ver_estadisticas = require_permiso(P_INCIDENTE_ESTADISTICAS)
+TIPOS_DESCARGA = {
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "pdf": "application/pdf",
+    "csv": "text/csv; charset=utf-8",
+}
 
 
 # ── 1. Endpoints de Usuario Autenticado / Perfil ─────────────────────────────
@@ -71,12 +88,27 @@ puede_gestionar_perfiles = require_permiso(P_PERFIL_GESTIONAR)
 )
 async def get_mi_perfil(
     user: Dict[str, Any] = Depends(get_current_active_user),
+    usuarios_repo: UsuarioRepository = Depends(get_usuario_repository),
 ):
+    persona = {}
+    try:
+        persona = usuarios_repo.obtener_persona(user["id"]) or {}
+    except Exception as exc:
+        logger.warning("Aviso obteniendo persona para /auth/me: %s", exc)
+
+    fnac = persona.get("per_fecha_nacimiento") or persona.get("fecha_nacimiento")
     return {
         "id": user["id"],
         "email": user.get("email"),
         "roles": user.get("roles", []),
         "permisos": sorted(permisos_de(user)),
+        "nombre": persona.get("per_nombre") or persona.get("nombre") or user.get("user_metadata", {}).get("nombre"),
+        "apellido": persona.get("per_apellido") or persona.get("apellido") or user.get("user_metadata", {}).get("apellido"),
+        "dni": persona.get("per_dni") or persona.get("dni"),
+        "telefono": persona.get("per_telefono") or persona.get("telefono"),
+        "direccion": persona.get("per_direccion") or persona.get("direccion"),
+        "fecha_nacimiento": str(fnac) if fnac else None,
+        "genero": persona.get("per_genero") or persona.get("genero"),
     }
 
 
@@ -234,6 +266,23 @@ async def buscar_usuarios_existentes(
         "usuarios": usuarios,
         "resultados": usuarios,
     }
+
+
+@router.get(
+    "/admin/usuarios/validar-unicidad",
+    summary="Validar unicidad de Correo Institucional, DNI, Teléfono y Legajo antes del alta (Solo Administrador)",
+    description="Verifica en tiempo real que el correo electrónico institucional, DNI, teléfono o legajo no existan previamente en el sistema.",
+)
+async def validar_unicidad_operador(
+    email: Optional[str] = Query(default=None, description="Correo electrónico institucional a verificar"),
+    dni: Optional[str] = Query(default=None, description="DNI a verificar"),
+    telefono: Optional[str] = Query(default=None, description="Teléfono a verificar"),
+    legajo: Optional[str] = Query(default=None, description="Legajo o matrícula personal a verificar"),
+    usuario_id: Optional[str] = Query(default=None, description="ID de usuario existente en caso de vinculación o edición"),
+    admin_user: Dict[str, Any] = Depends(solo_administrador),
+    service: OperadorService = Depends(get_operador_service),
+):
+    return service.validar_unicidad_operador(email=email, dni=dni, telefono=telefono, legajo=legajo, usuario_id=usuario_id)
 
 
 @router.get(
@@ -426,7 +475,41 @@ async def correlacionar_incidentes_haversine(
     return service.correlacionar_incidentes(body, current_op)
 
 
-# ── 4. Perfiles y permisos (RBAC dinámico) ───────────────────────────────────
+# ── 4. Estadísticas anónimas de emergencias (RF-4.4 / CU-11) ─────────────────
+
+@router.get(
+    "/admin/estadisticas/resumen",
+    response_model=ResumenEstadisticasResponse,
+    summary="Estadísticas anónimas de las emergencias (permiso incidente.estadisticas)",
+    description="Totales de duración, horarios, activación, zonas, edades y red de apoyo. No devuelve datos personales ni evidencias.",
+)
+async def obtener_estadisticas_incidentes(
+    filtros: FiltroEstadisticasQuery = Depends(),
+    current_op: Dict[str, Any] = Depends(puede_ver_estadisticas),
+    service: EstadisticaService = Depends(get_estadistica_service),
+):
+    return service.obtener_resumen_estadistico(filtros)
+
+
+@router.get(
+    "/admin/estadisticas/exportar",
+    summary="Descargar el resumen estadístico en Excel, PDF o CSV (permiso incidente.estadisticas)",
+)
+async def exportar_estadisticas_incidentes(
+    formato: Literal["xlsx", "pdf", "csv"] = Query(default="xlsx"),
+    filtros: FiltroEstadisticasQuery = Depends(),
+    current_op: Dict[str, Any] = Depends(puede_ver_estadisticas),
+    service: EstadisticaService = Depends(get_estadistica_service),
+):
+    archivo = service.exportar_reporte_agregado(filtros, formato)
+    return Response(
+        content=archivo.contenido,
+        media_type=TIPOS_DESCARGA[formato],
+        headers={"Content-Disposition": f'attachment; filename="{archivo.nombre_archivo}"'},
+    )
+
+
+# ── 5. Perfiles y permisos (RBAC dinámico) ───────────────────────────────────
 
 @router.get(
     "/admin/permisos",

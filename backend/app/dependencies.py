@@ -34,6 +34,7 @@ from app.services.alerta_service import AlertaService
 from app.services.autenticacion_institucional_service import AutenticacionInstitucionalService
 from app.services.catalogo_service import CatalogoInstitucionalService
 from app.services.cuenta_service import CuentaService
+from app.services.estadistica_service import EstadisticaService
 from app.services.evidencia_service import EvidenciaService
 from app.services.perfil_service import PerfilService
 from app.services.export_service import ExportService, export_service
@@ -241,3 +242,11 @@ def get_supervision_service(
     usuarios: UsuarioRepository = Depends(get_usuario_repository),
 ) -> SupervisionService:
     return SupervisionService(incidentes, evidencias, usuarios)
+
+
+def get_estadistica_service(
+    incidentes: IncidenteRepository = Depends(get_incidente_repository),
+    usuarios: UsuarioRepository = Depends(get_usuario_repository),
+    red_apoyo: RedApoyoRepository = Depends(get_red_apoyo_repository),
+) -> EstadisticaService:
+    return EstadisticaService(incidentes, usuarios, red_apoyo)

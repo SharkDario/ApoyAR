@@ -116,7 +116,32 @@ class SupervisionService:
             filas = self._incidentes.listar_paginado(COLUMNAS_INCIDENTES_HISTORIAL, "inc_fecha_hora", offset, limit, estado=filtro)
             for inc in filas:
                 self._completar_nombre_victima(inc)
-            return _pagina([_alias_incidente_consola(inc, con_notas=True) for inc in filas], total, page, limit)
+
+            # La hora de cierre está en el historial que llena el trigger de auditoría.
+            # Si se reabrió y se volvió a cerrar, vale el último cierre.
+            cierres: Dict[str, str] = {}
+            ids_cerrados = [inc["inc_id_incidente"] for inc in filas if inc.get("inc_estado") != "en_curso"]
+            if ids_cerrados:
+                try:
+                    res = (
+                        self._incidentes._query("historial_incidente")
+                        .select("inc_id_incidente, hisinc_creado_en")
+                        .in_("inc_id_incidente", ids_cerrados)
+                        .eq("hisinc_estado_anterior", "en_curso")
+                        .order("hisinc_creado_en")
+                        .execute()
+                    )
+                    for fila in self._incidentes._filas(res):
+                        cierres[fila["inc_id_incidente"]] = fila["hisinc_creado_en"]
+                except Exception as exc:
+                    logger.warning("No se pudo consultar la hora de cierre de los incidentes: %s", exc)
+
+            incidentes = []
+            for inc in filas:
+                item = _alias_incidente_consola(inc, con_notas=True)
+                item["fecha_fin"] = cierres.get(inc["inc_id_incidente"]) if inc.get("inc_estado") != "en_curso" else None
+                incidentes.append(item)
+            return _pagina(incidentes, total, page, limit)
         except Exception as exc:
             logger.error("Error consultando incidentes para autoridad: %s", exc)
             raise ErrorInternoError(f"Error consultando incidentes: {exc}")

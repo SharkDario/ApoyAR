@@ -41,6 +41,20 @@ class RedApoyoRepository(SupabaseRepository):
         )
         return bool(res.data)
 
+    def listar_vinculos_de_victimas(self, victima_ids: List[str]) -> List[Dict[str, Any]]:
+        """Vínculos activos (víctima y parentesco) de varias víctimas, para las estadísticas de la red."""
+        filas: List[Dict[str, Any]] = []
+        for i in range(0, len(victima_ids), 150):
+            res = (
+                self._query()
+                .select("usu_id_victima, redapo_parentesco")
+                .in_("usu_id_victima", victima_ids[i:i + 150])
+                .eq("redapo_estado", "activo")
+                .execute()
+            )
+            filas.extend(self._filas(res))
+        return filas
+
     def listar_tokens_push_activos(self, usuario_ids: List[str]) -> List[Dict[str, Any]]:
         """Dispositivos activos con `disusu_expo_push_token` no nulo de los usuarios indicados."""
         res = (

@@ -40,6 +40,13 @@ class CargoInstitucionalRepository(SupabaseRepository):
         res = self._query().select("car_id_cargo").eq("carins_legajo_o_matricula", legajo).execute()
         return bool(res.data)
 
+    def buscar_por_legajo(self, legajo: str) -> Optional[Dict[str, Any]]:
+        """Busca una adscripción por su número de legajo o matrícula."""
+        if not legajo:
+            return None
+        res = self._query().select("usu_id_usuario, carins_legajo_o_matricula").eq("carins_legajo_o_matricula", legajo.strip()).execute()
+        return self._primera_fila(res)
+
     def upsert(self, datos: Dict[str, Any]) -> None:
         self._query().upsert(datos).execute()
 

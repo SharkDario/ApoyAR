@@ -5,7 +5,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.errors import AccesoDenegadoError, RecursoNoEncontradoError, SolicitudInvalidaError
+from app.errors import AccesoDenegadoError, ConflictoError, RecursoNoEncontradoError, SolicitudInvalidaError
 from app.repositories.alerta_temprana_repository import AlertaTempranaRepository
 from app.repositories.auditoria_exportacion_repository import AuditoriaExportacionRepository
 from app.repositories.cargo_institucional_repository import CargoInstitucionalRepository
@@ -245,6 +245,143 @@ class ExportacionIndividualTest(unittest.TestCase):
     def test_rol_actor_prioriza_rol_institucional(self):
         self.assertEqual(rol_actor_auditoria(["Víctima", "Autoridad"], "x"), "Autoridad")
         self.assertEqual(rol_actor_auditoria([], "Titular"), "Titular")
+
+
+class OperadorServiceUnicidadTest(unittest.TestCase):
+
+    def setUp(self):
+        from app.repositories.perfil_repository import PerfilRepository
+        from app.schemas.admin import CrearOperadorRequest
+        from app.services.operador_service import OperadorService
+        from app.services.perfil_service import PerfilService
+
+        self.db = FakeDB()
+        self.client = FakeClient(self.db)
+        self.usuarios_repo = UsuarioRepository(self.client)
+        self.perfiles_repo = PerfilRepository(self.client)
+        self.cargos_repo = CargoInstitucionalRepository(self.client)
+        self.auth_mock = MagicMock()
+        self.auth_mock.listar_usuarios.return_value = []
+        self.auth_mock.crear_usuario.return_value = "new-uuid-1234"
+        self.servicio = OperadorService(
+            usuarios=self.usuarios_repo,
+            perfiles=self.perfiles_repo,
+            cargos=self.cargos_repo,
+            auth_gateway=self.auth_mock,
+        )
+        self.admin = {"id": "admin-uuid", "email": "admin@apoyar.gob.ar"}
+        self.CrearOperadorRequest = CrearOperadorRequest
+
+        self.db.tables["perfil"] = [
+            {"prf_id_perfil": "p-aut", "prf_nombre": "Autoridad"},
+            {"prf_id_perfil": "p-adm", "prf_nombre": "Administrador"},
+        ]
+        self.db.tables["usuario"] = [
+            {"usu_id_usuario": "u-existente", "usu_email": "existente@policia.gob.ar", "per_id_persona": "p-1"}
+        ]
+        self.db.tables["persona"] = [{
+            "per_id_persona": "p-1",
+            "per_nombre": "Juan",
+            "per_apellido": "Pérez",
+            "per_dni": "35111222",
+            "per_telefono": "3704112233",
+        }]
+        self.db.tables["cargo_institucional"] = [{
+            "usu_id_usuario": "u-existente",
+            "carins_legajo_o_matricula": "LP-POL-9999",
+            "carins_activo": True,
+        }]
+
+    def test_rechaza_alta_con_correo_existente(self):
+        req = self.CrearOperadorRequest(
+            email="existente@policia.gob.ar",
+            password="Password123!",
+            nombre="Carlos",
+            apellido="Gómez",
+            dni="40999888",
+            telefono="3704998877",
+            rol="Administrador",
+            roles=["Administrador"],
+        )
+        with self.assertRaises(ConflictoError) as ctx:
+            self.servicio.crear_operador(req, self.admin)
+        self.assertIn("correo electrónico", ctx.exception.detail.lower())
+
+    def test_rechaza_alta_con_dni_existente(self):
+        req = self.CrearOperadorRequest(
+            email="carlos.nuevo@policia.gob.ar",
+            password="Password123!",
+            nombre="Carlos",
+            apellido="Gómez",
+            dni="35111222",
+            telefono="3704998877",
+            rol="Administrador",
+            roles=["Administrador"],
+        )
+        with self.assertRaises(ConflictoError) as ctx:
+            self.servicio.crear_operador(req, self.admin)
+        self.assertIn("dni", ctx.exception.detail.lower())
+
+    def test_rechaza_alta_con_telefono_existente(self):
+        req = self.CrearOperadorRequest(
+            email="carlos.nuevo@policia.gob.ar",
+            password="Password123!",
+            nombre="Carlos",
+            apellido="Gómez",
+            dni="40999888",
+            telefono="3704112233",
+            rol="Administrador",
+            roles=["Administrador"],
+        )
+        with self.assertRaises(ConflictoError) as ctx:
+            self.servicio.crear_operador(req, self.admin)
+        self.assertIn("teléfono", ctx.exception.detail.lower())
+
+    def test_rechaza_alta_con_legajo_existente(self):
+        req = self.CrearOperadorRequest(
+            email="carlos.nuevo@policia.gob.ar",
+            password="Password123!",
+            nombre="Carlos",
+            apellido="Gómez",
+            dni="40999888",
+            telefono="3704998877",
+            rol="Autoridad",
+            roles=["Autoridad"],
+            id_sede=1,
+            id_cargo=1,
+            legajo_o_matricula="LP-POL-9999",
+        )
+        with self.assertRaises(ConflictoError) as ctx:
+            self.servicio.crear_operador(req, self.admin)
+        self.assertIn("legajo", ctx.exception.detail.lower())
+
+    def test_permite_alta_cuando_datos_son_unicos(self):
+        req = self.CrearOperadorRequest(
+            email="carlos.unico@policia.gob.ar",
+            password="Password123!",
+            nombre="Carlos",
+            apellido="Gómez",
+            dni="40999888",
+            telefono="3704998877",
+            rol="Administrador",
+            roles=["Administrador"],
+        )
+        resp = self.servicio.crear_operador(req, self.admin)
+        self.assertEqual(resp["status"], "ok")
+        self.assertEqual(resp["email"], "carlos.unico@policia.gob.ar")
+
+    def test_validar_unicidad_detecta_conflictos(self):
+        val = self.servicio.validar_unicidad_operador(
+            email="existente@policia.gob.ar",
+            dni="35111222",
+            telefono="3704112233",
+            legajo="LP-POL-9999",
+        )
+        self.assertFalse(val["disponible"])
+        self.assertIn("email", val["errores"])
+        self.assertIn("dni", val["errores"])
+        self.assertIn("telefono", val["errores"])
+        self.assertIn("legajo", val["errores"])
 
 
 if __name__ == "__main__":

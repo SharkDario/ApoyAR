@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.x509.oid import NameOID
 
-from app.errors import AccesoDenegadoError
+from app.errors import AccesoDenegadoError, SolicitudInvalidaError
 from app.repositories.cargo_institucional_repository import CargoInstitucionalRepository
 from app.repositories.evidencia_repository import EvidenciaRepository, prefijo_expediente
 from app.repositories.evidencia_storage import EvidenciaStorage
@@ -107,6 +107,35 @@ class FormatosDeAudioTest(unittest.TestCase):
     def test_wav_y_m4a_no_se_convierten(self):
         self.assertFalse(evidencia_cripto.es_audio_amr(b"RIFF" + bytes(40)))
         self.assertFalse(evidencia_cripto.es_audio_amr(bytes(4) + b"ftypM4A " + b"mp4a"))
+
+
+class CambioDeEstadoTest(unittest.TestCase):
+
+    def setUp(self):
+        from app.schemas.incidentes import ActualizarEstadoRequest
+        from app.services.incidente_service import IncidenteService
+
+        self.Solicitud = ActualizarEstadoRequest
+        self.db = FakeDB()
+        self.db.tables["incidente"] = [{"inc_id_incidente": INCIDENTE, "usu_id_victima": TESTIGO, "inc_estado": "en_curso", "inc_notas": None}]
+        self.servicio = IncidenteService(IncidenteRepository(FakeClient(self.db)), *[MagicMock() for _ in range(6)])
+        self.operador = {"id": AUTORIDAD, "roles": ["Autoridad"]}
+
+    def test_la_victima_cierra_sin_motivo_extendido(self):
+        self.servicio.actualizar_estado(INCIDENTE, self.Solicitud(estado="cerrado"), {"id": TESTIGO, "roles": ["Civil"]})
+        self.assertEqual(self.db.tables["incidente"][0]["inc_estado"], "cerrado")
+
+    def test_el_operador_cierra_solo_con_motivo(self):
+        with self.assertRaises(SolicitudInvalidaError):
+            self.servicio.actualizar_estado(INCIDENTE, self.Solicitud(estado="cerrado", notas="corto"), self.operador)
+        self.servicio.actualizar_estado(INCIDENTE, self.Solicitud(estado="falso_positivo", notas="Ruido de una película"), self.operador)
+        self.assertEqual(self.db.tables["incidente"][0]["inc_estado"], "falso_positivo")
+
+    def test_el_operador_no_puede_reabrir(self):
+        self.db.tables["incidente"][0]["inc_estado"] = "cerrado"
+        with self.assertRaises(AccesoDenegadoError):
+            self.servicio.actualizar_estado(INCIDENTE, self.Solicitud(estado="en_curso", notas="Reabierto por el operador"), self.operador)
+        self.assertEqual(self.db.tables["incidente"][0]["inc_estado"], "cerrado")
 
 
 class ListadoTestigosTest(unittest.TestCase):
@@ -204,6 +233,19 @@ class CorrelacionTest(unittest.TestCase):
         self.assertIn(f"Posible relación con incidente {otro}", notas[INCIDENTE])
         self.assertIn(f"Posible relación con incidente {INCIDENTE}", notas[otro])
         self.assertIn("op@apoyar.local", notas[otro])
+
+    def test_el_listado_informa_el_ultimo_cierre_desde_el_historial(self):
+        self.db.tables["incidente"][0]["inc_estado"] = "cerrado"
+        self.db.tables["historial_incidente"] = [
+            {"inc_id_incidente": INCIDENTE, "hisinc_estado_anterior": "en_curso", "hisinc_estado_nuevo": "cerrado", "hisinc_creado_en": "2026-05-01T12:10:00+00:00"},
+            {"inc_id_incidente": INCIDENTE, "hisinc_estado_anterior": "cerrado", "hisinc_estado_nuevo": "en_curso", "hisinc_creado_en": "2026-05-01T12:20:00+00:00"},
+            {"inc_id_incidente": INCIDENTE, "hisinc_estado_anterior": "en_curso", "hisinc_estado_nuevo": "cerrado", "hisinc_creado_en": "2026-05-01T12:30:00+00:00"},
+        ]
+
+        incidentes = {i["id"]: i for i in self.servicio.listar_incidentes(None, 1, 10)["incidentes"]}
+
+        self.assertEqual(incidentes[INCIDENTE]["fecha_fin"], "2026-05-01T12:30:00+00:00")
+        self.assertIsNone(incidentes["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]["fecha_fin"])
 
     def test_incidente_sin_gps_no_genera_coincidencias(self):
         cerca_de_cero = SugerenciasQuery(latitud=0, longitud=0, fecha_hora="2026-05-01T12:00:00Z", radio_metros=500)
