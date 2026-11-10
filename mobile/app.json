@@ -1,0 +1,75 @@
+{
+  "expo": {
+    "newArchEnabled": false,
+    "name": "ApoyAR",
+    "slug": "ApoyAR",
+    "scheme": "apoyar",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "notification": {
+        "icon": "./assets/notification-icon.png",
+        "color": "#E53935"
+      },
+      "usesCleartextTraffic": true,
+      "predictiveBackGestureEnabled": false,
+      "package": "com.anonymous.mobile",
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "RECORD_AUDIO",
+        "MODIFY_AUDIO_SETTINGS",
+        "CAMERA",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION",
+        "FOREGROUND_SERVICE_MICROPHONE",
+        "POST_NOTIFICATIONS",
+        "WAKE_LOCK",
+        "VIBRATE",
+        "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+        "RECEIVE_BOOT_COMPLETED"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-font",
+      "expo-status-bar",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "ApoyAR necesita acceso al micrófono para la Escucha en vivo y el Modo Resguardo.",
+          "enableBackgroundRecording": true
+        }
+      ],
+      "@react-native-community/datetimepicker",
+      "@maplibre/maplibre-react-native",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "ApoyAR necesita acceso a tu ubicación en segundo plano para actualizar a tus contactos durante una emergencia activa.",
+          "locationAlwaysPermission": "ApoyAR necesita acceso a tu ubicación en segundo plano para actualizar a tus contactos durante una emergencia activa.",
+          "locationWhenInUsePermission": "ApoyAR necesita tu ubicación para enviarla a tus contactos cuando pides ayuda.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
+        }
+      ],
+      "expo-web-browser",
+      "expo-video",
+      "expo-sharing"
+    ]
+  }
+}

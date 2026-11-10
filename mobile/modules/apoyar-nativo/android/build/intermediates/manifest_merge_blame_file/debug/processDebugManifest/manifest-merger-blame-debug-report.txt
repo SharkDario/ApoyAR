@@ -1,0 +1,26 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="expo.modules.apoyarnativo" >
+4
+5    <uses-sdk android:minSdkVersion="24" />
+6
+7    <application>
+7-->C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml:2:3-11:17
+8
+9        <!-- Android no permite abrir el micrófono al arrancar: sólo se avisa para reanudar la escucha -->
+10        <receiver
+10-->C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml:4:5-10:16
+11            android:name="expo.modules.apoyarnativo.ArranqueReceiver"
+11-->C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml:5:7-39
+12            android:exported="false" >
+12-->C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml:6:7-31
+13            <intent-filter>
+13-->C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml:7:7-9:23
+14                <action android:name="android.intent.action.BOOT_COMPLETED" />
+14-->C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml:8:9-71
+14-->C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml:8:17-68
+15            </intent-filter>
+16        </receiver>
+17    </application>
+18
+19</manifest>

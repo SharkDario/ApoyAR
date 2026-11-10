@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="expo.modules.apoyarnativo" >
+
+    <uses-sdk android:minSdkVersion="24" />
+
+    <application>
+
+        <!-- Android no permite abrir el micrófono al arrancar: sólo se avisa para reanudar la escucha -->
+        <receiver
+            android:name="expo.modules.apoyarnativo.ArranqueReceiver"
+            android:exported="false" >
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+    </application>
+
+</manifest>

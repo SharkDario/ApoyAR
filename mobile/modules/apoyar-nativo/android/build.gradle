@@ -1,0 +1,28 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.apoyar.nativo'
+version = '1.0.0'
+
+android {
+  namespace "expo.modules.apoyarnativo"
+  defaultConfig {
+    versionCode 1
+    versionName "1.0.0"
+  }
+  androidResources {
+    noCompress += ['onnx', 'mdl', 'fst', 'int', 'mat', 'ie', 'dubm']
+  }
+}
+
+dependencies {
+  implementation 'androidx.core:core-ktx:1.13.1'
+  implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
+  implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.22.0'
+  implementation('com.alphacephei:vosk-android:0.3.75') {
+    exclude group: 'net.java.dev.jna'
+  }
+  implementation 'net.java.dev.jna:jna:5.18.1@aar'
+}

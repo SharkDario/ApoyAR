@@ -1,0 +1,30 @@
+-- Merging decision tree log ---
+manifest
+ADDED from C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml:1:1-12:12
+INJECTED from C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml:1:1-12:12
+	package
+		INJECTED from C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml
+	xmlns:android
+		ADDED from C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml:1:11-69
+application
+ADDED from C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml:2:3-11:17
+receiver#expo.modules.apoyarnativo.ArranqueReceiver
+ADDED from C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml:4:5-10:16
+	android:exported
+		ADDED from C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml:6:7-31
+	android:name
+		ADDED from C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml:5:7-39
+intent-filter#action:name:android.intent.action.BOOT_COMPLETED
+ADDED from C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml:7:7-9:23
+action#android.intent.action.BOOT_COMPLETED
+ADDED from C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml:8:9-71
+	android:name
+		ADDED from C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml:8:17-68
+uses-sdk
+INJECTED from C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml reason: use-sdk injection requested
+INJECTED from C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml
+INJECTED from C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml
+	android:targetSdkVersion
+		INJECTED from C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml
+	android:minSdkVersion
+		INJECTED from C:\Users\mdari\Desktop\ApoyAR\mobile\modules\apoyar-nativo\android\src\main\AndroidManifest.xml
