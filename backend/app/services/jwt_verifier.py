@@ -96,8 +96,13 @@ class JwtVerifier:
             raise NoAutenticadoError(plantilla_error.format(str(exc)))
 
     def _decodificar_hs256(self, token: str) -> Dict[str, Any]:
-        """HS256 con SUPABASE_JWT_SECRET o API_SECRET_KEY (tokens del login institucional)."""
-        candidatos = [s for s in [self._settings.supabase_jwt_secret, self._settings.api_secret_key] if s]
+        """
+        HS256 con SUPABASE_JWT_SECRET o con el secreto de los tokens del login institucional.
+        API_SECRET_KEY no sirve para firmar sesiones: la app móvil la lleva incluida.
+        """
+        candidatos = list(dict.fromkeys(
+            s for s in [self._settings.supabase_jwt_secret, self._settings.clave_tokens_institucionales] if s
+        ))
         ultimo_error = None
         for secreto in candidatos:
             try:

@@ -7,8 +7,9 @@
 //
 // LENGUAJE NEUTRO: "quien envía la alerta", "la víctima".
 //
-// TODO (Iter 2): Reemplazar los datos de ejemplo (nombre, ubicación, hora)
-// por los datos reales recibidos en el payload de la Notificación Push.
+// Mientras la emergencia sigue en curso, el contacto ve la ubicación en tiempo real y puede
+// escuchar el audio del entorno en vivo. El audio llega por un canal privado de Supabase
+// Realtime (sólo la red de apoyo), se reproduce en bloques de 2 s y no queda guardado.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import React, { useCallback, useEffect, useState, useRef } from 'react';
@@ -28,10 +29,14 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { Feather } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
+import * as FileSystem from 'expo-file-system/legacy';
+import { createAudioPlayer, type AudioPlayer } from 'expo-audio';
 import { Map, Camera, UserLocation, Marker, GeoJSONSource, Layer } from '@maplibre/maplibre-react-native';
 import { useTheme } from '@theme';
 import { supabase } from '../lib/supabase';
 import { resolverDireccionAsync, esSoloCoordenadas } from '../lib/geoUtils';
+import { uint8ArrayToBase64 } from '../lib/cryptoForense';
+import { CANAL_AUDIO_VIVO } from '../services/acousticMonitoring';
 
 const NOTIFICACION_ICON = require('../../assets/notificacion.png');
 const MAPTILER_KEY = process.env.EXPO_PUBLIC_MAPTILER_API_KEY;
@@ -78,12 +83,12 @@ export function AlertReceivedScreen({ route, navigation }: Props) {
       typeof (rawParams.latitude ?? rawParams.latitud) === 'number' &&
       !isNaN(rawParams.latitude ?? rawParams.latitud)
         ? (rawParams.latitude ?? rawParams.latitud)
-        : -34.603722,
+        : -26.1852,
     longitude:
       typeof (rawParams.longitude ?? rawParams.longitud) === 'number' &&
       !isNaN(rawParams.longitude ?? rawParams.longitud)
         ? (rawParams.longitude ?? rawParams.longitud)
-        : -58.381592,
+        : -58.1756,
   };
 
   const initialLat = alertData.latitude;
@@ -242,6 +247,109 @@ export function AlertReceivedScreen({ route, navigation }: Props) {
       supabase.removeChannel(channel);
     };
   }, [alertData.incidenteId, procesarActualizacionIncidente]);
+
+  // ── Escucha en vivo del audio del incidente (sólo red de apoyo, sin guardar nada) ──
+  const [escuchandoVivo, setEscuchandoVivo] = useState(false);
+  const [estadoAudioVivo, setEstadoAudioVivo] = useState<'conectando' | 'esperando' | 'en_vivo' | 'error'>('conectando');
+
+  useEffect(() => {
+    if (!escuchandoVivo || !alertData.incidenteId || isResguardoFinalizado) return;
+    let activo = true;
+    let ultimaSecuencia = 0;
+    let ultimoBloqueEn = 0;
+    let reproductor: AudioPlayer | null = null;
+    const cola: string[] = [];
+    const borrar = (uri: string) => {
+      FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+    };
+    setEstadoAudioVivo('conectando');
+
+    // Reproduce los bloques de a uno y borra cada archivo temporal apenas termina
+    const reproducirSiguiente = () => {
+      if (!activo || reproductor) return;
+      const uri = cola.shift();
+      if (!uri) return;
+      const actual = createAudioPlayer(uri);
+      reproductor = actual;
+      let terminado = false;
+      const terminar = () => {
+        if (terminado) return;
+        terminado = true;
+        clearTimeout(limite);
+        try {
+          actual.release();
+        } catch (_) {}
+        borrar(uri);
+        if (reproductor === actual) reproductor = null;
+        reproducirSiguiente();
+      };
+      const limite = setTimeout(terminar, 2600); // Cada bloque dura 2 s
+      actual.addListener('playbackStatusUpdate', (status) => {
+        if (status.isLoaded && status.duration > 0 && status.currentTime >= status.duration) terminar();
+      });
+      actual.play();
+    };
+
+    const canal = supabase
+      .channel(`${CANAL_AUDIO_VIVO}:${alertData.incidenteId}`, { config: { private: true } })
+      .on('broadcast', { event: 'audio' }, ({ payload }) => {
+        if (!activo || typeof payload?.d !== 'string' || !(payload.n > ultimaSecuencia)) return;
+        ultimaSecuencia = payload.n;
+
+        // Ley µ de 8 bits a 8 kHz → WAV PCM de 16 bits
+        const leyMu = atob(payload.d);
+        const wav = new Uint8Array(44 + leyMu.length * 2);
+        const vista = new DataView(wav.buffer);
+        wav.set([0x52, 0x49, 0x46, 0x46], 0); // RIFF
+        vista.setUint32(4, 36 + leyMu.length * 2, true);
+        wav.set([0x57, 0x41, 0x56, 0x45, 0x66, 0x6d, 0x74, 0x20], 8); // WAVEfmt
+        vista.setUint32(16, 16, true);
+        vista.setUint16(20, 1, true); // PCM
+        vista.setUint16(22, 1, true); // Mono
+        vista.setUint32(24, 8000, true);
+        vista.setUint32(28, 16000, true);
+        vista.setUint16(32, 2, true);
+        vista.setUint16(34, 16, true);
+        wav.set([0x64, 0x61, 0x74, 0x61], 36); // data
+        vista.setUint32(40, leyMu.length * 2, true);
+        for (let i = 0; i < leyMu.length; i++) {
+          const codigo = ~leyMu.charCodeAt(i) & 0xff;
+          const muestra = ((((codigo & 0x0f) << 3) + 132) << ((codigo >> 4) & 0x07)) - 132;
+          vista.setInt16(44 + i * 2, codigo & 0x80 ? -muestra : muestra, true);
+        }
+
+        const uri = `${FileSystem.cacheDirectory}audio_vivo_${payload.n}.wav`;
+        FileSystem.writeAsStringAsync(uri, uint8ArrayToBase64(wav), { encoding: FileSystem.EncodingType.Base64 })
+          .then(() => {
+            if (!activo) return borrar(uri);
+            cola.push(uri);
+            while (cola.length > 2) borrar(cola.shift() as string); // Con atraso se saltea lo viejo
+            ultimoBloqueEn = Date.now();
+            setEstadoAudioVivo('en_vivo');
+            reproducirSiguiente();
+          })
+          .catch(() => {});
+      })
+      .subscribe((estado) => {
+        if (!activo) return;
+        if (estado === 'SUBSCRIBED') setEstadoAudioVivo('esperando');
+        else if (estado === 'CHANNEL_ERROR' || estado === 'TIMED_OUT') setEstadoAudioVivo('error');
+      });
+
+    const vigia = setInterval(() => {
+      if (ultimoBloqueEn && Date.now() - ultimoBloqueEn > 6000) setEstadoAudioVivo('esperando');
+    }, 2000);
+
+    return () => {
+      activo = false;
+      clearInterval(vigia);
+      supabase.removeChannel(canal);
+      try {
+        (reproductor as AudioPlayer | null)?.release();
+      } catch (_) {}
+      cola.forEach(borrar);
+    };
+  }, [escuchandoVivo, alertData.incidenteId, isResguardoFinalizado]);
 
   // ── Handlers ───────────────────────────────────────────────────────────────
 
@@ -473,7 +581,7 @@ export function AlertReceivedScreen({ route, navigation }: Props) {
                   {victimNameState} desactivó el Modo Resguardo
                 </Text>
                 <Text style={[typography.scale.caption, { color: colors.text.secondary, marginTop: 2 }]}>
-                  El seguimiento GPS en vivo se detuvo. El mapa muestra su última ubicación registrada.
+                  El seguimiento GPS y el audio en vivo se detuvieron. El mapa muestra su última ubicación registrada.
                 </Text>
               </View>
             </View>
@@ -516,6 +624,42 @@ export function AlertReceivedScreen({ route, navigation }: Props) {
               Copiar dirección y coordenadas
             </Text>
           </Pressable>
+
+          {/* Audio del incidente en vivo */}
+          {!isResguardoFinalizado && alertData.incidenteId && (
+            <Pressable
+              onPress={() => setEscuchandoVivo((valor) => !valor)}
+              accessible
+              accessibilityRole="button"
+              accessibilityLabel={escuchandoVivo ? 'Detener la escucha en vivo' : 'Escuchar el audio del incidente en vivo'}
+              accessibilityLiveRegion="polite"
+              style={({ pressed }) => [
+                styles.actionButton,
+                {
+                  backgroundColor: escuchandoVivo ? colors.semantic.infoBg : colors.bg.elevated,
+                  borderColor: escuchandoVivo ? colors.semantic.info : colors.border.default,
+                  borderWidth: 1,
+                  borderRadius: radii.md,
+                  height: 48,
+                  marginBottom: spacing.xl,
+                  opacity: pressed ? 0.7 : 1,
+                },
+              ]}
+            >
+              <Feather name={escuchandoVivo ? 'volume-2' : 'headphones'} size={20} color={colors.text.primary} />
+              <Text style={[typography.scale.bodyBold, { color: colors.text.primary, marginLeft: spacing.sm }]}>
+                {!escuchandoVivo
+                  ? 'Escuchar audio en vivo'
+                  : estadoAudioVivo === 'en_vivo'
+                  ? 'Escuchando en vivo · Tocá para detener'
+                  : estadoAudioVivo === 'error'
+                  ? 'Audio en vivo no disponible · Detener'
+                  : estadoAudioVivo === 'esperando'
+                  ? 'Esperando audio… · Detener'
+                  : 'Conectando audio… · Detener'}
+              </Text>
+            </Pressable>
+          )}
 
           {/* Estado de la Evidencia */}
           <View

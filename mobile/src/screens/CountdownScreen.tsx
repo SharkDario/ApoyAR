@@ -4,7 +4,7 @@
 //
 // Ahora opera con arquitectura "Background-First" desacoplada:
 // La ejecución operativa completa (creación de incidente, despacho prioritario,
-// grabación de audio de 5s, cifrado AES-256-GCM, subida a Storage, sellado RFC 3161
+// grabación de audio en segmentos de 10 s, cifrado AES-256-GCM, subida a Storage, sellado RFC 3161
 // y telemetría continua) vive en resguardoService.ts y NO se interrumpe si la usuaria
 // sale de la app o bloquea la pantalla.
 // ─────────────────────────────────────────────────────────────────────────────

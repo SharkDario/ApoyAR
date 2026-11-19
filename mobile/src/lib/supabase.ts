@@ -8,15 +8,15 @@
 // Incorrecto: https://abcdefgh.supabase.co/rest/v1/
 // ─────────────────────────────────────────────────────────────────────────────
 
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { almacenSeguro } from './cryptoForense';
 import { createClient } from '@supabase/supabase-js';
 
 // Extraemos la URL base eliminando cualquier path extra que el usuario
 // haya copiado por error desde el Dashboard de Supabase.
 const rawUrl = process.env.EXPO_PUBLIC_SUPABASE_URL ?? '';
-const SUPABASE_URL = rawUrl.replace(/\/(rest\/v1\/?|auth\/v1\/?|storage\/v1\/?)$/, '');
+export const SUPABASE_URL = rawUrl.replace(/\/(rest\/v1\/?|auth\/v1\/?|storage\/v1\/?)$/, '');
 
-const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? '';
+export const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? '';
 
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
   throw new Error(
@@ -26,8 +26,8 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: {
-    // AsyncStorage persiste la sesión entre reinicios de la app.
-    storage: AsyncStorage,
+    // La sesión persiste entre reinicios cifrada con una clave protegida por el Keystore.
+    storage: almacenSeguro,
     autoRefreshToken: true,
     persistSession: true,
     detectSessionInUrl: false, // No usamos OAuth redirect en Iter 1

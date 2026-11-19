@@ -152,14 +152,16 @@ def rechazar_api_secret_invalido(x_api_secret: Optional[str]) -> None:
 
 
 def exigir_usuario_o_api_secret(current_user: Optional[Dict[str, Any]], x_api_secret: Optional[str]) -> None:
-    """Autenticación dual: Bearer de usuario activo o X-Api-Secret válido."""
-    is_api_secret_valid = bool(x_api_secret and settings.api_secret_key and x_api_secret == settings.api_secret_key)
-    if x_api_secret and not is_api_secret_valid:
-        raise HTTPException(status_code=401, detail="Invalid API Secret")
-    if not current_user and not is_api_secret_valid:
+    """
+    Exige la sesión de un usuario activo. X-Api-Secret identifica a la app pero no a una persona
+    (viaja dentro de la app, así que no es un secreto): si se envía debe ser correcta, pero no
+    reemplaza al Bearer, para que el control de titularidad se aplique siempre.
+    """
+    rechazar_api_secret_invalido(x_api_secret)
+    if not current_user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Falta encabezado de autorización Bearer o X-Api-Secret válido.",
+            detail="Falta el encabezado de autorización Bearer de un usuario activo.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 

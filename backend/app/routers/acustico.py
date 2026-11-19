@@ -24,8 +24,8 @@ async def analizar_audio_en_vivo(
     palabra_clave: str = Form(default="pizza"),
     x_api_secret: Optional[str] = Header(default=None, alias="X-Api-Secret"),
 ):
-    # Verificación opcional de API secret si fue configurado
-    if settings.api_secret_key and x_api_secret and x_api_secret != settings.api_secret_key:
+    # La cabecera de la app es obligatoria: sin ella cualquiera podría usar el análisis
+    if not (x_api_secret and x_api_secret == settings.api_secret_key):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Secreto de API inválido")
 
     # Aceptar campo 'audio_file' o 'file' indistintamente
@@ -87,7 +87,7 @@ async def transcribir_palabra_clave(
     file: Optional[UploadFile] = File(default=None),
     x_api_secret: Optional[str] = Header(default=None, alias="X-Api-Secret"),
 ):
-    if settings.api_secret_key and x_api_secret and x_api_secret != settings.api_secret_key:
+    if not (x_api_secret and x_api_secret == settings.api_secret_key):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Secreto de API inválido")
 
     upload = audio_file or file

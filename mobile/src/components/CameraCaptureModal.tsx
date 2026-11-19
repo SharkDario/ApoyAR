@@ -133,8 +133,9 @@ export const CameraCaptureModal: React.FC<CameraCaptureModalProps> = ({
       );
       FileSystem.deleteAsync(fileUri, { idempotent: true }).catch(() => {});
 
-      // 4. Cierre automático del incidente tras guardar la evidencia
-      if (incidenteId) {
+      // 4. Cierre automático del incidente que abrió esta captura. Si había una emergencia en
+      // curso, la captura se suma a ese incidente y no lo cierra: terminarla exige verificar la identidad.
+      if (incidenteId && incidenteId !== resguardoService.getCurrentIncidenteId()) {
         await colaEvidencias.encolarAsync({
           tipo: 'estado_incidente',
           incidenteId,
@@ -143,13 +144,6 @@ export const CameraCaptureModal: React.FC<CameraCaptureModalProps> = ({
         });
       }
 
-      try {
-        if (!esTestigo && resguardoService.isResguardoActive()) {
-          await resguardoService.desactivarModoResguardoAsync();
-        }
-      } catch (desactErr) {
-        console.warn('[CameraCaptureModal] Error desactivando modo resguardo:', desactErr);
-      }
 
       const pendientes = await colaEvidencias.procesarAsync();
 

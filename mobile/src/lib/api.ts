@@ -115,6 +115,12 @@ export function getApiBaseUrl(): string {
   }
 
   const finalUrl = trimmed.replace(/\/+$/, '');
+
+  // RNF-02: fuera del entorno de desarrollo ningún dato sale del teléfono sin TLS
+  if (!__DEV__ && !/^https:\/\//i.test(finalUrl)) {
+    throw new Error('[ApoyAR API] El backend debe publicarse con HTTPS: revisá EXPO_PUBLIC_API_BASE_URL.');
+  }
+
   if (__DEV__ && !hasLoggedBaseUrl) {
     hasLoggedBaseUrl = true;
     console.log(`[ApoyAR API] Backend FastAPI resuelto en: ${finalUrl}`);

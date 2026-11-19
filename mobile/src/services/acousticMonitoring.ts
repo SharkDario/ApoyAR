@@ -19,6 +19,8 @@ import * as Notifications from 'expo-notifications';
 import * as FileSystem from 'expo-file-system/legacy';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getApiBaseUrl, getApiSecretKey } from '../lib/api';
+import { almacenSeguro } from '../lib/cryptoForense';
+import { supabase, SUPABASE_URL, SUPABASE_ANON_KEY } from '../lib/supabase';
 import { apoyarNativo } from '../../modules/apoyar-nativo';
 import { analizarVentanaLocalAsync, PRIORIDAD_ANALISIS, prepararModelosLocalesAsync } from '../lib/analisisAcustico';
 import { esperarAsync, pulsoDeAudio } from '../lib/temporizadorAudio';
@@ -31,6 +33,16 @@ export const DEFAULT_KEYWORD = 'pizza';
 
 export const NOTIFICATION_CHANNEL_ESCUCHA = 'apoyar_audio_stream_channel';
 export const NOTIFICATION_ID_ESCUCHA = 'apoyar_escucha_activa_service';
+
+// ── Audio en vivo para la red de apoyo (CU-06 / RF-4.2) ───────────────────────
+// Mientras el Modo Resguardo está activo, el mismo stream del micrófono se reenvía a los
+// contactos por un canal privado de Supabase Realtime (sólo la red de apoyo puede unirse).
+// Es efímero: no se guarda en ningún lado. La evidencia sigue su propio camino cifrado.
+// Bloques de 2 s (64.000 bytes PCM 16 kHz) que viajan a 8 kHz en ley µ (G.711): ~11 kB/s.
+export const CANAL_AUDIO_VIVO = 'audio_vivo';
+const BYTES_BLOQUE_VIVO = 64000;
+const LIMITE_ENVIO_VIVO_MS = 8000;
+const audioVivo = { bloques: [] as Uint8Array[], bytes: 0, envioDesde: 0 };
 
 export type TriggerOrigin = 'palabra_clave' | 'violencia_ambiental' | 'amenaza_verbal_vosk' | 'automatico' | 'manual';
 type TriggerCallback = (origen: TriggerOrigin) => void;
@@ -134,12 +146,12 @@ class AcousticMonitoringService {
     await this.asegurarCanalNotificacionSigiloso();
     prepararModelosLocalesAsync();
 
-    const storedKeyword = await AsyncStorage.getItem(STORAGE_KEY_KEYWORD);
+    const storedKeyword = await almacenSeguro.getItem(STORAGE_KEY_KEYWORD);
     if (storedKeyword && storedKeyword.trim().length > 0) {
       this.currentKeyword = normalizarPalabraClave(storedKeyword);
     } else {
       this.currentKeyword = DEFAULT_KEYWORD;
-      await AsyncStorage.setItem(STORAGE_KEY_KEYWORD, DEFAULT_KEYWORD);
+      await almacenSeguro.setItem(STORAGE_KEY_KEYWORD, DEFAULT_KEYWORD);
     }
 
     const wasActive = await AsyncStorage.getItem(STORAGE_KEY_MONITORING_ACTIVE);
@@ -156,9 +168,9 @@ class AcousticMonitoringService {
   async startAsync(keyword?: string): Promise<boolean> {
     if (keyword && keyword.trim().length > 0) {
       this.currentKeyword = normalizarPalabraClave(keyword);
-      await AsyncStorage.setItem(STORAGE_KEY_KEYWORD, this.currentKeyword);
+      await almacenSeguro.setItem(STORAGE_KEY_KEYWORD, this.currentKeyword);
     } else {
-      const stored = await AsyncStorage.getItem(STORAGE_KEY_KEYWORD);
+      const stored = await almacenSeguro.getItem(STORAGE_KEY_KEYWORD);
       if (stored && stored.trim().length > 0) {
         this.currentKeyword = normalizarPalabraClave(stored);
       }
@@ -279,6 +291,71 @@ class AcousticMonitoringService {
         }
       }
 
+      // Audio en vivo para la red de apoyo mientras dure el Modo Resguardo
+      const incidenteEnVivo = resguardoService.isResguardoActive() ? resguardoService.getCurrentIncidenteId() : null;
+      if (!incidenteEnVivo) {
+        audioVivo.bloques = [];
+        audioVivo.bytes = 0;
+      } else {
+        audioVivo.bloques.push(bytes);
+        audioVivo.bytes += bytes.length;
+        if (audioVivo.bytes >= BYTES_BLOQUE_VIVO) {
+          const pcm = new Uint8Array(audioVivo.bytes);
+          let posicion = 0;
+          for (const bloque of audioVivo.bloques) {
+            pcm.set(bloque, posicion);
+            posicion += bloque.length;
+          }
+          audioVivo.bloques = [];
+          audioVivo.bytes = 0;
+
+          // Con la red lenta el bloque se descarta: es escucha en vivo, no evidencia
+          if (Date.now() - audioVivo.envioDesde > LIMITE_ENVIO_VIVO_MS) {
+            // PCM 16 bits a 16 kHz → 8 kHz (promedio de a pares) → ley µ de 8 bits
+            const muestras = new DataView(pcm.buffer);
+            const leyMu = new Uint8Array(Math.floor(pcm.length / 4));
+            for (let i = 0; i < leyMu.length; i++) {
+              let muestra = (muestras.getInt16(i * 4, true) + muestras.getInt16(i * 4 + 2, true)) >> 1;
+              const signo = muestra < 0 ? 0x80 : 0;
+              muestra = Math.min(Math.abs(muestra), 32635) + 132;
+              let exponente = 7;
+              for (let mascara = 0x4000; (muestra & mascara) === 0 && exponente > 0; mascara >>= 1) exponente--;
+              leyMu[i] = ~(signo | (exponente << 4) | ((muestra >> (exponente + 3)) & 0x0f)) & 0xff;
+            }
+
+            audioVivo.envioDesde = Date.now();
+            supabase.auth
+              .getSession()
+              .then(({ data }) => {
+                if (!data.session) return;
+                // Por HTTP y no por WebSocket: con la pantalla bloqueada el latido del socket se detiene
+                return fetch(`${SUPABASE_URL}/realtime/v1/api/broadcast`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    apikey: SUPABASE_ANON_KEY,
+                    Authorization: `Bearer ${data.session.access_token}`,
+                  },
+                  body: JSON.stringify({
+                    messages: [
+                      {
+                        topic: `${CANAL_AUDIO_VIVO}:${incidenteEnVivo}`,
+                        event: 'audio',
+                        private: true,
+                        payload: { n: Date.now(), d: arrayBufferToBase64(leyMu.buffer) },
+                      },
+                    ],
+                  }),
+                });
+              })
+              .catch(() => {})
+              .finally(() => {
+                audioVivo.envioDesde = 0;
+              });
+          }
+        }
+      }
+
       // Durante la emergencia activa, el stream continúa vivo para el FGS y telemetría,
       // pero no saturamos la red enviando ventanas a Vosk/YAMNet
       if (this.isEmergencyModeActive) {
@@ -337,7 +414,7 @@ class AcousticMonitoringService {
       this.consecutiveErrors = 0;
 
       const transcripcion = result.transcripcion || result.transcripcion_vosk || '';
-      if (transcripcion && transcripcion.trim().length > 0) {
+      if (__DEV__ && transcripcion && transcripcion.trim().length > 0) {
         console.log(`[Vosk] Transcripción: "${transcripcion.trim()}"`);
       }
       if (result.yamnet_top_class) {
@@ -556,7 +633,7 @@ class AcousticMonitoringService {
    * El Foreground Service de micrófono DEBE mantenerse activo ininterrumpidamente para:
    * 1. Impedir que Android suspenda o mate el proceso JS en segundo plano.
    * 2. Permitir que el bucle de polling de GPS (Location.getCurrentPositionAsync) funcione.
-   * 3. Extraer los 5 segundos de audio pericial directamente del stream sin reiniciar el hardware.
+   * 3. Extraer los segmentos de audio pericial (10 s) directamente del stream sin reiniciar el hardware.
    */
   private async dispararModoResguardo(origen: TriggerOrigin): Promise<void> {
     this.isEmergencyModeActive = true;
@@ -601,7 +678,7 @@ class AcousticMonitoringService {
   async capturarEvidenciaForenseWavAsync(
     duracionMs: number = 10000,
     sigueActivo?: () => boolean
-  ): Promise<string> {
+  ): Promise<string | null> {
     const bytesPorSegundo = 16000 * 2; // 16kHz * 16-bit mono = 32,000 bytes/s
     const bytesRequeridos = Math.round((bytesPorSegundo * duracionMs) / 1000); // 320,000 bytes para 10s
 
@@ -636,11 +713,9 @@ class AcousticMonitoringService {
       }
     }
 
-    // Si por alguna razón no se capturaron bytes (ej. cancelación inmediata), crear buffer mínimo de 1s
+    // Sin audio capturado no se genera archivo: una evidencia sólo puede contener sonido real
     if (bytesAcumulados === 0) {
-      const silencio = new Uint8Array(32000);
-      chunksParaEvidencia.push(silencio);
-      bytesAcumulados = 32000;
+      return null;
     }
 
     // Consolidar todos los bytes PCM
@@ -733,7 +808,7 @@ class AcousticMonitoringService {
     const cleaned = normalizarPalabraClave(newKeyword);
     if (!cleaned) return;
     this.currentKeyword = cleaned;
-    await AsyncStorage.setItem(STORAGE_KEY_KEYWORD, this.currentKeyword);
+    await almacenSeguro.setItem(STORAGE_KEY_KEYWORD, this.currentKeyword);
     console.log(`[Escucha en vivo] Palabra clave activa: "${this.currentKeyword}"`);
   }
 }

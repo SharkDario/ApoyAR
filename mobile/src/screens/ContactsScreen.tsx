@@ -160,15 +160,11 @@ export function ContactsScreen() {
         await AsyncStorage.setItem(`@apoyar_code_${user.id}`, codigo);
         Alert.alert('Código Actualizado', `Tu nuevo código de vinculación para compartir es: ${codigo}`);
       } else {
-        // Fallback alfanumérico único
-        const randomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-        setMyCode(randomCode);
-        await AsyncStorage.setItem(`@apoyar_code_${user.id}`, randomCode);
-        Alert.alert('Código Actualizado', `Tu nuevo código de vinculación para compartir es: ${randomCode}`);
+        // Un código que no quedó guardado en el servidor no sirve para vincular: se conserva el actual
+        Alert.alert('No se pudo actualizar', 'No pudimos generar un código nuevo. Tu código actual sigue siendo válido.');
       }
     } catch (e) {
-      const randomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-      setMyCode(randomCode);
+      Alert.alert('Sin conexión', 'No pudimos generar un código nuevo. Tu código actual sigue siendo válido.');
     } finally {
       setIsRegenerating(false);
     }

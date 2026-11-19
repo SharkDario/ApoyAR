@@ -90,7 +90,7 @@ class AutenticacionInstitucionalService:
         roles = self._roles_institucionales(user_id)
         permisos = self._permisos_institucionales(user_id)
 
-        signing_secret = self._settings.supabase_jwt_secret or self._settings.api_secret_key
+        signing_secret = self._settings.clave_tokens_institucionales
         jwt_claims = {
             "sub": user_id,
             "email": email_clean,

@@ -175,9 +175,11 @@ class ColaEvidencias {
       .from('evidencias')
       .upload(tarea.rutaStorage, base64ToUint8Array(contenido), {
         contentType: 'application/octet-stream', // binario cifrado, no reproducible directo
-        upsert: true,
+        upsert: false, // Un archivo subido no se sobrescribe
       });
-    if (errorSubida) {
+    // Si se perdió la respuesta de un intento anterior, el archivo ya está en Storage: se sigue con el sellado
+    const yaSubido = errorSubida && /already exists|duplicate/i.test(`${(errorSubida as any).error ?? ''} ${errorSubida.message}`);
+    if (errorSubida && !yaSubido) {
       const estado = Number((errorSubida as any).statusCode ?? (errorSubida as any).status);
       const rechazada = estado >= 400 && estado < 500 && ![401, 408, 429].includes(estado);
       if (rechazada) throw new Error(`Storage respondió ${estado}: ${errorSubida.message}`);

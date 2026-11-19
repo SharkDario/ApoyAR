@@ -384,28 +384,55 @@ export function EvidenceModal({ visible, onClose }: Props) {
     }
   }, [user?.id]);
 
+  // ── Las pruebas descifradas sólo existen mientras se ven o se escuchan ───────
+  const purgarDescifrados = useCallback(async (incluirExportaciones: boolean) => {
+    try {
+      const cache = FileSystem.cacheDirectory as string;
+      await FileSystem.deleteAsync(`${cache}evidencias_desencriptadas/`, { idempotent: true });
+      for (const nombre of await FileSystem.readDirectoryAsync(cache)) {
+        if (/^(temp_enc_|raw_exp_|preview_|video_|legacy_)/.test(nombre)) {
+          await FileSystem.deleteAsync(`${cache}${nombre}`, { idempotent: true });
+        }
+      }
+      // Los paquetes exportados ya se compartieron o se guardaron donde eligió la persona
+      if (incluirExportaciones) {
+        const documentos = FileSystem.documentDirectory as string;
+        for (const nombre of await FileSystem.readDirectoryAsync(documentos)) {
+          if (/^Expediente_Forense_ApoyAR_.*\.zip$/.test(nombre)) {
+            await FileSystem.deleteAsync(`${documentos}${nombre}`, { idempotent: true });
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[EvidenceModal] No se pudieron borrar los archivos temporales:', e);
+    }
+  }, []);
+
   useEffect(() => {
     if (visible) {
+      purgarDescifrados(true);
       cargarEvidencias(1);
     } else {
+      purgarDescifrados(false);
       detenerAudio();
       setPreviewImageUri(null);
       setPreviewVideoUri(null);
       setPreviewItem(null);
       setPreviewVideoItem(null);
     }
-  }, [visible, cargarEvidencias, detenerAudio]);
+  }, [visible, cargarEvidencias, detenerAudio, purgarDescifrados]);
 
   // Limpieza al desmontar
   useEffect(() => {
     return () => {
+      purgarDescifrados(false);
       detenerAudio();
       setPreviewImageUri(null);
       setPreviewVideoUri(null);
       setPreviewItem(null);
       setPreviewVideoItem(null);
     };
-  }, [detenerAudio]);
+  }, [detenerAudio, purgarDescifrados]);
 
   const [updatingConsentId, setUpdatingConsentId] = useState<string | null>(null);
   const [exportingIncidenteId, setExportingIncidenteId] = useState<string | null>(null);
@@ -959,8 +986,9 @@ export function EvidenceModal({ visible, onClose }: Props) {
       return;
     }
 
-    // Detener cualquier otro audio previo
+    // Detener cualquier otro audio previo y borrar lo que se haya descifrado antes
     detenerAudio();
+    await purgarDescifrados(false);
 
     setActiveEvidenciaId(item.id);
     setAudioState('downloading');

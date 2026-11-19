@@ -13,6 +13,7 @@
 
 import * as Crypto from 'expo-crypto';
 import * as FileSystem from 'expo-file-system/legacy';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 import { gcm } from '@noble/ciphers/aes.js';
@@ -177,6 +178,75 @@ export async function cifrarMetadatosAsync(datos: Record<string, unknown>, dekHe
     contenido_b64: uint8ArrayToBase64(contenido),
   };
 }
+
+// ── Almacén local cifrado: sesión, PIN de camuflaje y palabra clave (RNF-02) ──
+// Mismo contrato que AsyncStorage. Cada valor se guarda cifrado con AES-256-GCM y la clave del
+// almacén queda envuelta por la clave maestra del Keystore: fuera de este teléfono (respaldo o
+// copia de la carpeta de la app) los valores no se pueden leer.
+const CLAVE_ALMACEN_SEGURO = '@apoyar_clave_almacen_seguro';
+const MARCA_VALOR_CIFRADO = 'cifrado:v1:';
+let claveAlmacenSeguro: Promise<string | null> | null = null;
+
+export const almacenSeguro = {
+  /** Clave del almacén en hexadecimal, o null donde no hay Keystore (se guarda como antes). */
+  clave(): Promise<string | null> {
+    claveAlmacenSeguro ??= (async () => {
+      if (!apoyarNativo) return null;
+      try {
+        const envuelta = await AsyncStorage.getItem(CLAVE_ALMACEN_SEGURO);
+        // Dos intentos: un fallo momentáneo del Keystore no debe descartar la sesión guardada
+        for (let intento = 0; envuelta && intento < 2; intento++) {
+          try {
+            return await apoyarNativo.desenvolverDekDispositivo(envuelta);
+          } catch (_) {}
+        }
+        // Primera vez, o clave de otra instalación: se genera una nueva
+        const nueva = bytesToHex(await Crypto.getRandomBytesAsync(32));
+        await AsyncStorage.setItem(CLAVE_ALMACEN_SEGURO, await apoyarNativo.envolverDekDispositivo(nueva));
+        return nueva;
+      } catch (err) {
+        console.warn('[CryptoForense] Almacén cifrado no disponible:', err);
+        claveAlmacenSeguro = null; // Se reintenta en el próximo acceso
+        return null;
+      }
+    })();
+    return claveAlmacenSeguro;
+  },
+
+  async getItem(nombre: string): Promise<string | null> {
+    const guardado = await AsyncStorage.getItem(nombre);
+    if (guardado === null) return null;
+    if (!guardado.startsWith(MARCA_VALOR_CIFRADO)) {
+      // Valor guardado en claro por una versión anterior: se cifra ahora
+      almacenSeguro.setItem(nombre, guardado).catch(() => {});
+      return guardado;
+    }
+    const clave = await almacenSeguro.clave();
+    if (!clave) return null;
+    try {
+      const paquete = base64ToUint8Array(guardado.slice(MARCA_VALOR_CIFRADO.length));
+      const plano = gcm(hexToBytes(clave), paquete.slice(0, 12)).decrypt(paquete.slice(12));
+      return decodeURIComponent(Array.from(plano, (byte) => `%${byte.toString(16).padStart(2, '0')}`).join(''));
+    } catch (_) {
+      return null; // Cifrado con una clave que ya no existe
+    }
+  },
+
+  async setItem(nombre: string, valor: string): Promise<void> {
+    const clave = await almacenSeguro.clave();
+    if (!clave) return AsyncStorage.setItem(nombre, valor);
+    const iv = await Crypto.getRandomBytesAsync(12);
+    const cifrado = gcm(hexToBytes(clave), iv).encrypt(new TextEncoder().encode(valor));
+    const paquete = new Uint8Array(iv.length + cifrado.length);
+    paquete.set(iv, 0);
+    paquete.set(cifrado, iv.length);
+    await AsyncStorage.setItem(nombre, MARCA_VALOR_CIFRADO + uint8ArrayToBase64(paquete));
+  },
+
+  removeItem(nombre: string): Promise<void> {
+    return AsyncStorage.removeItem(nombre);
+  },
+};
 
 /**
  * Ejecuta cifrado en sobre (Envelope Encryption con AES-256-GCM) sobre el archivo de audio.

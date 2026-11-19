@@ -41,6 +41,8 @@ import { acousticMonitoringService } from './acousticMonitoring';
 
 export const STORAGE_KEY_RESGUARDO_ACTIVO = '@apoyar_modo_resguardo_activo';
 export const STORAGE_KEY_RESGUARDO_INCIDENTE = '@apoyar_modo_resguardo_incidente';
+// La Escucha en vivo estaba apagada y el resguardo encendió el micrófono: se apaga al terminar
+const STORAGE_KEY_MICROFONO_POR_RESGUARDO = '@apoyar_microfono_por_resguardo';
 
 // ── Grabación pericial continua ──────────────────────────────────────────────────────────
 // Durante el Modo Resguardo se graba en segmentos consecutivos, sin huecos entre ellos.
@@ -247,6 +249,8 @@ class ResguardoService {
 
     this.isActive = true;
     this.currentOrigin = origin;
+    // El audio del incidente va a la evidencia y a la red de apoyo, no al análisis de Vosk/YAMNet
+    acousticMonitoringService.setEmergencyActive(true);
     this.statusMessage = 'Obteniendo ubicación satelital...';
     await AsyncStorage.setItem(STORAGE_KEY_RESGUARDO_ACTIVO, 'true');
     this.notifyListeners();
@@ -358,7 +362,19 @@ class ResguardoService {
       // 6. Iniciar telemetría continua de geolocalización por polling (sin FGS de ubicación)
       this.iniciarBucleTelemetriaGps(incidenteId);
 
-      // 7. Grabación pericial continua en segmentos de 10 s mientras dure el resguardo.
+      // 7. Con la Escucha en vivo apagada se enciende el stream del micrófono mientras dure la
+      // emergencia: de ahí salen la evidencia y el audio en vivo que oye la red de apoyo.
+      // Android sólo lo permite con la app en primer plano; si falla, se graba con expo-audio.
+      if (!acousticMonitoringService.isActive() && AppState.currentState === 'active') {
+        const encendido = await acousticMonitoringService.startAsync().catch(() => false);
+        if (encendido) {
+          await AsyncStorage.setItem(STORAGE_KEY_MICROFONO_POR_RESGUARDO, 'true');
+        } else {
+          await acousticMonitoringService.stopAsync().catch(() => {});
+        }
+      }
+
+      // 8. Grabación pericial continua en segmentos de 10 s mientras dure el resguardo.
       // Se lanza desacoplada: el pipeline retorna enseguida y la grabación sigue en segundo plano.
       this.iniciarGrabacionContinuaAsync({
         userId: user.id,
@@ -376,6 +392,7 @@ class ResguardoService {
 
     } catch (err: any) {
       console.error('[ResguardoService] Error general en el pipeline de resguardo:', err);
+      acousticMonitoringService.setEmergencyActive(false); // La escucha debe poder volver a dispararlo
       this.statusMessage = 'Error en activación';
       this.notifyListeners();
       throw err;
@@ -504,7 +521,9 @@ class ResguardoService {
             ? 'Hardware Volume Keys'
             : 'Manual SOS',
         segmento: numeroSegmento,
-        duracion_segmento_ms: DURACION_SEGMENTO_MS,
+        // 32 bytes por milisegundo en WAV de 16 kHz mono; el último segmento puede ser más corto
+        duracion_segmento_ms:
+          formato === 'wav' ? Math.round((envelope.sobreDigital.tamano_audio_plano - 44) / 32) : DURACION_SEGMENTO_MS,
         timestamp: Date.now(),
       },
       envelope,
@@ -575,6 +594,8 @@ class ResguardoService {
             .eq('inc_id_incidente', incidenteId);
 
           // 2. Notificación al backend para retransmisión por SSE/WebSockets/Push
+          // El backend exige la sesión del usuario: se usa el token vigente, no el de la activación
+          this.authToken = (await supabase.auth.getSession()).data.session?.access_token ?? this.authToken;
           fetch(`${baseUrl}/api/v1/incidentes/${incidenteId}/posicion`, {
             method: 'PATCH',
             headers: {
@@ -631,6 +652,10 @@ class ResguardoService {
 
     // Restablecer el estado de emergencia en el servicio acústico
     acousticMonitoringService.setEmergencyActive(false);
+    if ((await AsyncStorage.getItem(STORAGE_KEY_MICROFONO_POR_RESGUARDO).catch(() => null)) === 'true') {
+      await AsyncStorage.removeItem(STORAGE_KEY_MICROFONO_POR_RESGUARDO).catch(() => {});
+      await acousticMonitoringService.stopAsync().catch(() => {});
+    }
 
     const storedIncidente = await AsyncStorage.getItem(STORAGE_KEY_RESGUARDO_INCIDENTE).catch(() => null);
     const idToClose = this.incidenteId || storedIncidente;

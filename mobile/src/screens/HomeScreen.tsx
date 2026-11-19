@@ -37,6 +37,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as Notifications from 'expo-notifications';
 import { useFocusEffect } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { almacenSeguro } from '../lib/cryptoForense';
 import {
   AudioModule,
   useAudioRecorder,
@@ -305,7 +306,7 @@ export function HomeScreen({ navigation }: Props) {
     cargarPreferenciaBotonesAsync().then(setIsBotonesFisicos);
 
     // Cargar PIN configurado
-    AsyncStorage.getItem(STORAGE_KEY_CAMOUFLAGE_PIN).then((val) => {
+    almacenSeguro.getItem(STORAGE_KEY_CAMOUFLAGE_PIN).then((val) => {
       if (val && /^\d{4}$/.test(val.trim())) {
         setCamouflagePin(val.trim());
         setPinInput(val.trim());
@@ -1069,6 +1070,8 @@ export function HomeScreen({ navigation }: Props) {
     Location.stopLocationUpdatesAsync('background-location-task').catch(() => { });
     await resguardoService.desactivarModoResguardoAsync();
     setModoResguardo(false);
+    // Si el resguardo había encendido el micrófono por su cuenta, al terminar lo apaga
+    setIsAcousticActive(acousticMonitoringService.isActive());
     if (alertasPendientes.length > 0) {
       setShowPendingAlerts(true);
     }
@@ -1268,7 +1271,7 @@ export function HomeScreen({ navigation }: Props) {
     }
 
     await acousticMonitoringService.setKeywordAsync(clean);
-    await AsyncStorage.setItem(STORAGE_KEY_KEYWORD, clean);
+    await almacenSeguro.setItem(STORAGE_KEY_KEYWORD, clean);
     setKeywordText(clean);
     await handleCloseVoiceModal();
 
@@ -1295,7 +1298,7 @@ export function HomeScreen({ navigation }: Props) {
       return;
     }
 
-    await AsyncStorage.setItem(STORAGE_KEY_CAMOUFLAGE_PIN, cleaned);
+    await almacenSeguro.setItem(STORAGE_KEY_CAMOUFLAGE_PIN, cleaned);
     setCamouflagePin(cleaned);
     setIsEditingPin(false);
     Alert.alert(
@@ -3692,10 +3695,9 @@ export function HomeScreen({ navigation }: Props) {
         visible={showCameraModal}
         onClose={() => setShowCameraModal(false)}
         onCapturaFinalizada={async () => {
+          // Una captura hecha durante una emergencia no la termina: eso exige verificar la identidad
+          if (resguardoService.isResguardoActive()) return;
           Location.stopLocationUpdatesAsync('background-location-task').catch(() => { });
-          if (resguardoService.isResguardoActive()) {
-            await resguardoService.desactivarModoResguardoAsync();
-          }
           setModoResguardo(false);
         }}
       />

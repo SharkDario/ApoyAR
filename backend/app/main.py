@@ -7,6 +7,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from app.config import settings
 from app.errors import AppError, BloqueoTemporalError
 from app.routers import incidentes, evidencias, acustico, admin_autoridad, usuarios
 
@@ -16,8 +17,9 @@ app = FastAPI(
     title="ApoyAR API",
     description="Backend de la plataforma de protección y preservación forense ApoyAR.",
     version="0.3.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    # En producción no se publica el listado de rutas
+    docs_url=None if settings.entorno == "produccion" else "/docs",
+    redoc_url=None if settings.entorno == "produccion" else "/redoc",
 )
 
 @app.exception_handler(AppError)
@@ -44,13 +46,12 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8081",
-        "http://127.0.0.1:8081",
-        "http://localhost:8082",
-        "http://127.0.0.1:8082",
-        "*",
-    ],
+    # En producción sólo los orígenes declarados en CORS_ORIGENES; en desarrollo, cualquiera
+    allow_origins=(
+        [origen.strip() for origen in settings.cors_origenes.split(",") if origen.strip()]
+        if settings.entorno == "produccion"
+        else ["http://localhost:8081", "http://127.0.0.1:8081", "http://localhost:8082", "http://127.0.0.1:8082", "*"]
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

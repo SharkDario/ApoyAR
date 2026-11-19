@@ -10,7 +10,7 @@
 // a la interfaz principal de ApoyAR.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -20,8 +20,8 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { useFocusEffect } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { almacenSeguro } from '../lib/cryptoForense';
 import * as LocalAuthentication from 'expo-local-authentication';
 
 export const STORAGE_KEY_CAMOUFLAGE_PIN = '@apoyar_camuflaje_pin';
@@ -50,15 +50,23 @@ export function FakeCalculatorScreen({ navigation, onUnlock }: Props) {
   const [waitingForOperand, setWaitingForOperand] = useState<boolean>(false);
   const [inputSequence, setInputSequence] = useState<string>('');
 
-  // Notificar estado activo de la pantalla de camuflaje
-  useFocusEffect(
-    useCallback(() => {
+  // Notificar estado activo de la pantalla de camuflaje.
+  // Al iniciar camuflada, App.tsx la muestra fuera del NavigationContainer: ahí no hay
+  // navegación (useFocusEffect fallaría) y la visibilidad sigue al montaje del componente.
+  useEffect(() => {
+    if (!navigation) {
       setCamouflageVisible(true);
-      return () => {
-        setCamouflageVisible(false);
-      };
-    }, [])
-  );
+      return () => setCamouflageVisible(false);
+    }
+    if (navigation.isFocused()) setCamouflageVisible(true);
+    const alEnfocar = navigation.addListener('focus', () => setCamouflageVisible(true));
+    const alSalir = navigation.addListener('blur', () => setCamouflageVisible(false));
+    return () => {
+      alEnfocar();
+      alSalir();
+      setCamouflageVisible(false);
+    };
+  }, [navigation]);
 
   /**
    * Procesa la entrada de dígitos y evalúa la secuencia secreta de desbloqueo.
@@ -167,7 +175,7 @@ export function FakeCalculatorScreen({ navigation, onUnlock }: Props) {
    */
   const handleEqual = useCallback(async () => {
     // 1. Evaluar si la secuencia coincide con el código secreto
-    const storedPin = (await AsyncStorage.getItem(STORAGE_KEY_CAMOUFLAGE_PIN)) || DEFAULT_CAMOUFLAGE_PIN;
+    const storedPin = (await almacenSeguro.getItem(STORAGE_KEY_CAMOUFLAGE_PIN)) || DEFAULT_CAMOUFLAGE_PIN;
     const cleanSeq = inputSequence.replace(/[^0-9]/g, '');
 
     if (cleanSeq.endsWith(storedPin)) {

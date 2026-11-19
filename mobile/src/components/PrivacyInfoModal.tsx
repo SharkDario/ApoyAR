@@ -65,7 +65,7 @@ export const PrivacyInfoModal: React.FC<PrivacyInfoModalProps> = ({
               <Feather name="shield" size={18} color={colors.semantic.info} />
             </View>
             <View style={{ flex: 1, marginLeft: 10 }}>
-              <Text style={[typography.scale.bodyBold, { color: colors.text.primary, fontSize: 15 }]} numberOfLines={1}>
+              <Text style={[typography.scale.bodyBold, { color: colors.text.primary, fontSize: 13 }]} numberOfLines={2} adjustsFontSizeToFit minimumFontScale={0.8}>
                 {title}
               </Text>
               <Text style={[typography.scale.caption, { color: colors.text.secondary, fontSize: 11 }]}>
@@ -122,7 +122,7 @@ export const PrivacyInfoModal: React.FC<PrivacyInfoModalProps> = ({
                 </Text>
               </View>
               <Text style={[styles.paragraph, { color: colors.text.secondary }]}>
-                Tus grabaciones y fotografías se protegen con cifrado de sobre AES-256-GCM y sello RFC 3161 (TSA). Tus contactos reciben aviso y mapa, pero el contenido íntimo queda bajo tu consentimiento explícito antes de cualquier exportación judicial.
+                Tus grabaciones y fotografías se protegen con cifrado de sobre AES-256-GCM y sello RFC 3161 (TSA). Durante una emergencia, tus contactos reciben el aviso, tu ubicación y el audio del entorno en vivo, que no queda guardado en sus teléfonos. Las grabaciones, fotos y videos quedan bajo tu consentimiento explícito antes de cualquier exportación judicial.
               </Text>
             </View>
 
@@ -173,7 +173,7 @@ const styles = StyleSheet.create({
   card: {
     width: '100%',
     maxWidth: 440,
-    maxHeight: '85%',
+    maxHeight: '94%',
     borderWidth: 1,
     padding: 16,
   },
@@ -197,7 +197,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   scrollArea: {
-    maxHeight: 380,
+    flexShrink: 1,
     marginBottom: 8,
   },
   infoBlock: {
